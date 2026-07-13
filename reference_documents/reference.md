@@ -1,0 +1,2 @@
+[wiki-llm replace RAG in corporation?](https://axk51013.medium.com/rethinking-agent-harness-part4-llm-wiki-%E5%8F%96%E4%BB%A3-rag-041629319804)
+[Langgraph-RAG](https://medium.com/@vinodkrane/next-generation-agentic-rag-with-langgraph-2026-edition-d1c4c068d2b8)
