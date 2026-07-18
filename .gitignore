@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+.env
+*.db
+*.db-wal
+*.db-shm
+.nanobot-workspace/
+wiki/
+raw/

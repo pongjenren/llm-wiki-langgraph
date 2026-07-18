@@ -1,0 +1,40 @@
+[project]
+name = "llm-wiki"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Jenren-Pong", email = "jenrenpong.ee14@nycu.edu.tw" }
+]
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "json-repair>=0.61.5",
+    # Upper bound is load-bearing: langgraph>=1.2.9 pulls langgraph-sdk>=0.4.2,
+    # which pins websockets<16, while nanobot-ai needs websockets>=16.
+    "langgraph>=1.2,<1.2.9",
+    "nanobot-ai>=0.2.2",
+    "openpyxl>=3.1.5",
+    "pydantic>=2.13.4",
+    "python-dotenv>=1.2.2",
+    "sentence-transformers>=5.6.0",
+    "sqlite-vec>=0.1.9",
+    "typer>=0.27.0",
+]
+
+[project.scripts]
+llm-wiki = "llm_wiki:main"
+
+[build-system]
+requires = ["uv_build>=0.11.17,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
