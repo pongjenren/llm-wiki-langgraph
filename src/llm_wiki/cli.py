@@ -151,6 +151,23 @@ def ingest(
 
 
 @app.command()
+def graph() -> None:
+    """Print both graphs as mermaid, for docs/graphs.md."""
+    from llm_wiki.graph import build_doc_graph, build_item_graph
+
+    # Building a graph never runs a node, so the dependencies can be empty here.
+    deps = Deps(conn=None, client=None, settings=settings)  # type: ignore[arg-type]
+    for title, builder in (
+        ("Stage 1 — `doc_graph`", build_doc_graph),
+        ("Stage 2 — `item_graph`", build_item_graph),
+    ):
+        typer.echo(f"## {title}\n")
+        typer.echo("```mermaid")
+        typer.echo(builder(deps).get_graph().draw_mermaid().strip())
+        typer.echo("```\n")
+
+
+@app.command()
 def status() -> None:
     """Show what is currently in the knowledge base."""
     conn = connect(settings.db_path)

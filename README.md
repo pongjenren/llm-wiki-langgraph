@@ -7,7 +7,9 @@ step runs through [nanobot](https://github.com/HKUDS/nanobot), which calls
 
 ## How it works
 
-Ingest runs in two stages.
+Ingest runs in two stages. The sketches below are the shape of the flow;
+[`docs/graphs.md`](docs/graphs.md) has the exact graphs, generated from the
+compiled code via `uv run llm-wiki graph`.
 
 **Stage 1 — document → items** (`graph/doc_graph.py`)
 
