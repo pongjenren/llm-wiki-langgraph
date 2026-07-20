@@ -25,6 +25,13 @@ _HEADING = re.compile(r"^#{2,6}\s+(.+?)\s*$", re.MULTILINE)
 
 CURRENT_MARKER = "[CURRENT]"
 
+# The banner prepended to a page that failed review. Kept as a constant so the
+# link pass can strip it before rewriting and let write_page re-add it.
+REVIEW_BANNER = "> [!warning]\n> This page did not pass review and needs a human check.\n"
+_REVIEW_BANNER_RE = re.compile(
+    r"^> \[!warning\]\n> This page did not pass review and needs a human check\.\n+"
+)
+
 
 def slugify(page_name: str) -> str:
     """Turn a page name into a filesystem-safe basename."""
@@ -45,6 +52,11 @@ def substitute_current(text: str, reference_number: int) -> str:
 def strip_references(markdown: str) -> str:
     """Remove a trailing References section, if the model wrote one anyway."""
     return _REFERENCES_SECTION.sub("", markdown).rstrip() + "\n"
+
+
+def strip_review_banner(markdown: str) -> str:
+    """Remove a leading needs-review banner, if present."""
+    return _REVIEW_BANNER_RE.sub("", markdown, count=1)
 
 
 def citations(markdown: str) -> set[int]:
@@ -84,7 +96,7 @@ def write_page(
 
     parts = []
     if needs_review:
-        parts.append("> [!warning]\n> This page did not pass review and needs a human check.\n")
+        parts.append(REVIEW_BANNER)
     parts.append(strip_references(body).rstrip() + "\n")
     if page_id_row is not None:
         references = render_references(conn, page_id_row["page_id"])

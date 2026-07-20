@@ -4,19 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
+import time
 from pathlib import Path
 from typing import Optional
 
 import typer
 
-from llm_wiki import embedding, loaders
-from llm_wiki.config import settings
+from llm_wiki import embedding, links, loaders, telemetry
+from llm_wiki.config import PROJECT_ROOT, settings
+from llm_wiki.db import repo
 from llm_wiki.db.connection import connect, init_db
 from llm_wiki.graph import Deps
 from llm_wiki.llm.client import NanobotClient
 from llm_wiki.pipeline import DocumentOutcome, ingest_documents
 
 app = typer.Typer(help="Ingest raw documents into the llm-wiki knowledge base.")
+
+log = logging.getLogger(__name__)
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -64,6 +69,29 @@ def _resolve_targets(path: Optional[Path], namespace: Optional[str]) -> list[tup
         # raw/<namespace>/<file>: the parent directory names the namespace.
         namespace = path.parent.name
     return [(namespace, path)]
+
+
+def _link_touched_pages(conn, outcomes: list[DocumentOutcome]) -> None:
+    """Relink the pages this run created or merged into.
+
+    Incremental by design: only pages touched here are rescanned, so they link
+    to one another and to any existing page they mention. Links *into* a new page
+    from pages left untouched are the job of `llm-wiki link` (full reconcile).
+    Best-effort -- a linking failure must not fail an otherwise good ingest.
+    """
+    touched: dict[str, set[int]] = {}
+    for outcome in outcomes:
+        for item in outcome.items:
+            if item.error is None and item.page_id is not None:
+                touched.setdefault(outcome.namespace, set()).add(item.page_id)
+
+    for namespace, page_ids in touched.items():
+        try:
+            links.link_pages(
+                conn, wiki_dir=settings.wiki_dir, namespace=namespace, page_ids=sorted(page_ids)
+            )
+        except Exception as exc:
+            log.warning("failed to link pages in namespace %s: %s", namespace, exc)
 
 
 def _report(outcomes: list[DocumentOutcome]) -> int:
@@ -140,9 +168,16 @@ def ingest(
         conn = connect(settings.db_path)
         try:
             init_db(conn, embedding.embedding_dim(model_name=settings.embedding_model))
+            start = time.monotonic()
             async with NanobotClient() as client:
                 deps = Deps(conn=conn, client=client, settings=settings)
                 outcomes = await ingest_documents(deps, targets)
+            elapsed = time.monotonic() - start
+            try:
+                telemetry.record_run(conn, outcomes, elapsed)
+            except Exception as exc:  # telemetry must never fail an ingest
+                log.warning("failed to record ingest telemetry: %s", exc)
+            _link_touched_pages(conn, outcomes)
             return _report(outcomes)
         finally:
             conn.close()
@@ -189,6 +224,121 @@ def status() -> None:
             typer.echo(f"  {row['namespace']}: {row['pages']} page(s){flagged}")
     finally:
         conn.close()
+
+
+@app.command()
+def reset(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Wipe the wiki pages and the database, back to a clean slate.
+
+    Raw source documents are never touched — re-running `ingest` rebuilds
+    everything from them.
+    """
+    wiki_dir = settings.wiki_dir
+    db_path = settings.db_path
+
+    # Guard against a misconfigured LLM_WIKI_WIKI_DIR turning this into an
+    # rm -rf of the project (or of the raw corpus we promise not to touch).
+    for forbidden, label in ((settings.raw_dir, "raw_dir"), (PROJECT_ROOT, "project root")):
+        if wiki_dir == forbidden:
+            typer.secho(f"Refusing to reset: wiki_dir is the {label}.", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+
+    pages = sorted(p for p in wiki_dir.rglob("*") if p.is_file()) if wiki_dir.exists() else []
+    # SQLite in WAL mode keeps state in sidecar files; leaving them behind
+    # would resurrect part of the old database.
+    db_files = [p for p in (db_path, *(db_path.with_name(db_path.name + s) for s in ("-wal", "-shm"))) if p.exists()]
+
+    if not pages and not db_files:
+        typer.echo("Already clean — nothing to remove.")
+        return
+
+    typer.echo(f"This will delete {len(pages)} page(s) under {wiki_dir}")
+    typer.echo(f"and {len(db_files)} database file(s) at {db_path}.")
+    typer.secho(f"{settings.raw_dir} will not be touched.", fg=typer.colors.GREEN)
+    if not yes:
+        typer.confirm("Proceed?", abort=True)
+
+    if wiki_dir.exists():
+        shutil.rmtree(wiki_dir)
+    wiki_dir.mkdir(parents=True, exist_ok=True)
+    for path in db_files:
+        path.unlink()
+
+    typer.secho("Reset complete. Run `llm-wiki ingest` to rebuild.", fg=typer.colors.GREEN)
+
+
+@app.command()
+def link(
+    namespace: Optional[str] = typer.Argument(
+        None, help="Namespace to relink. Defaults to every namespace."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report what would change without writing anything."
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show debug logging."),
+) -> None:
+    """Rebuild cross-page links across a whole namespace (full reconcile).
+
+    Ingest links incrementally as it runs; use this to backfill links into pages
+    added after their mentions were written, or after bulk changes.
+    """
+    _configure_logging(verbose)
+    conn = connect(settings.db_path)
+    try:
+        init_db(conn, embedding.embedding_dim(model_name=settings.embedding_model))
+
+        if namespace is not None:
+            namespaces = [namespace]
+        else:
+            namespaces = [
+                row["namespace"]
+                for row in conn.execute(
+                    "SELECT DISTINCT namespace FROM wiki_pages ORDER BY namespace"
+                )
+            ]
+        if not namespaces:
+            typer.echo("No pages to link.")
+            return
+
+        total_changed = 0
+        for ns in namespaces:
+            page_ids = [row["page_id"] for row in repo.list_pages(conn, ns)]
+            results = links.link_pages(
+                conn,
+                wiki_dir=settings.wiki_dir,
+                namespace=ns,
+                page_ids=page_ids,
+                dry_run=dry_run,
+            )
+            changed = [r for r in results if r.changed]
+            total_changed += len(changed)
+            link_count = sum(len(r.links) for r in results)
+            verb = "would update" if dry_run else "updated"
+            typer.echo(
+                f"{ns}: {verb} {len(changed)} of {len(results)} page(s), "
+                f"{link_count} link(s) total."
+            )
+            for r in changed:
+                typer.secho(f"    · {r.page_name}: {len(r.links)} link(s)", fg=typer.colors.CYAN)
+
+        if dry_run and total_changed:
+            typer.echo("\nDry run: no files were written.")
+    finally:
+        conn.close()
+
+
+@app.command()
+def dashboard(
+    host: str = typer.Option("127.0.0.1", help="Host to bind the dashboard server to."),
+    port: int = typer.Option(8000, help="Port to serve the dashboard on."),
+) -> None:
+    """Serve the read-only ingest dashboard as a local web page."""
+    from llm_wiki.dashboard import serve
+
+    typer.echo(f"Ingest dashboard on http://{host}:{port}  (Ctrl-C to stop)")
+    serve(host=host, port=port)
 
 
 def main() -> None:

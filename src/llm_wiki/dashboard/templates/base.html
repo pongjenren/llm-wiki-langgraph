@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}llm-wiki ingest dashboard{% endblock %}</title>
+  <style>
+    :root {
+      --bg: #f6f7f9; --card: #ffffff; --border: #e3e6ea; --text: #1c2024;
+      --muted: #6b7280; --accent: #2563eb;
+      --ok-bg: #e6f4ea; --ok-fg: #1e7d34;
+      --pending-bg: #eef0f2; --pending-fg: #566068;
+      --skip-bg: #fff4e5; --skip-fg: #a15c00;
+      --fail-bg: #fdecea; --fail-fg: #b3261e;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #14171a; --card: #1c2024; --border: #2b3036; --text: #e6e8ea;
+        --muted: #9aa4ae; --accent: #5b9bff;
+        --ok-bg: #14331f; --ok-fg: #6cd48a;
+        --pending-bg: #23282d; --pending-fg: #9aa4ae;
+        --skip-bg: #3a2c12; --skip-fg: #f0b45e;
+        --fail-bg: #3a1c1a; --fail-fg: #f28b82;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 15px/1.5 -apple-system, "Segoe UI", "Noto Sans TC", Roboto, sans-serif;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 20px 64px; }
+    header.top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    h1 { font-size: 20px; margin: 0; }
+    h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 32px 0 12px; }
+    .muted { color: var(--muted); }
+    .path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; }
+    .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }
+    .tile { padding: 14px 16px; }
+    .tile .n { font-size: 26px; font-weight: 650; }
+    .tile .k { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    .scroll { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+    td.wrap-cell { white-space: normal; }
+    tr:last-child td { border-bottom: none; }
+    .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+    .badge.ok { background: var(--ok-bg); color: var(--ok-fg); }
+    .badge.pending { background: var(--pending-bg); color: var(--pending-fg); }
+    .badge.skipped { background: var(--skip-bg); color: var(--skip-fg); }
+    .badge.failed { background: var(--fail-bg); color: var(--fail-fg); }
+    .badge.created { background: var(--ok-bg); color: var(--ok-fg); }
+    .badge.merged { background: var(--pending-bg); color: var(--pending-fg); }
+    .badge.flag { background: var(--skip-bg); color: var(--skip-fg); }
+    .btn { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
+    .btn:hover { border-color: var(--accent); }
+    .empty { padding: 28px; text-align: center; color: var(--muted); }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+    .err { color: var(--fail-fg); }
+    ul.items { margin: 6px 0 0; padding-left: 0; list-style: none; }
+    ul.items li { padding: 2px 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <h1><a href="/">llm-wiki ingest dashboard</a></h1>
+      <button class="btn" onclick="location.reload()">↻ 重新整理</button>
+    </header>
+    {% block body %}{% endblock %}
+  </div>
+</body>
+</html>

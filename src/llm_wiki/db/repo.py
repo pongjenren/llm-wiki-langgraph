@@ -223,3 +223,200 @@ def list_references(conn: sqlite3.Connection, wiki_id: int) -> list[sqlite3.Row]
         """,
         (wiki_id,),
     ).fetchall()
+
+
+# --------------------------------------------------------------------------
+# wiki_links  (page-to-page cross references)
+# --------------------------------------------------------------------------
+
+
+def load_link_dictionary(conn: sqlite3.Connection, namespace: str) -> list[sqlite3.Row]:
+    """Every alias in a namespace with the page it resolves to.
+
+    This is the dictionary the linker scans page bodies against. query_name is
+    already normalized (see normalize_name); page_name keeps the display form so
+    the caller can build the link target path.
+    """
+    return conn.execute(
+        """
+        SELECT a.query_name, a.page_id, p.page_name
+        FROM page_aliases a
+        JOIN wiki_pages p ON p.page_id = a.page_id
+        WHERE a.namespace = ?
+        """,
+        (namespace,),
+    ).fetchall()
+
+
+def replace_page_links(
+    conn: sqlite3.Connection,
+    *,
+    src_page_id: int,
+    namespace: str,
+    links: Sequence[tuple[int, str]],
+) -> None:
+    """Replace all outgoing links for a page.
+
+    Delete-then-insert keeps the table in sync with the freshly rewritten body:
+    a mention that disappeared drops its row rather than lingering.
+    """
+    conn.execute("DELETE FROM wiki_links WHERE src_page_id = ?", (src_page_id,))
+    for dst_page_id, anchor_text in links:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO wiki_links (src_page_id, dst_page_id, namespace, anchor_text)
+            VALUES (?, ?, ?, ?)
+            """,
+            (src_page_id, dst_page_id, namespace, anchor_text),
+        )
+
+
+def list_backlinks(conn: sqlite3.Connection, dst_page_id: int) -> list[sqlite3.Row]:
+    """Pages that link to the given page."""
+    return conn.execute(
+        """
+        SELECT l.src_page_id, p.page_name, l.anchor_text
+        FROM wiki_links l
+        JOIN wiki_pages p ON p.page_id = l.src_page_id
+        WHERE l.dst_page_id = ?
+        ORDER BY p.page_name COLLATE NOCASE
+        """,
+        (dst_page_id,),
+    ).fetchall()
+
+
+def list_outgoing_links(conn: sqlite3.Connection, src_page_id: int) -> list[sqlite3.Row]:
+    """Pages the given page links to."""
+    return conn.execute(
+        """
+        SELECT l.dst_page_id, p.page_name, l.anchor_text
+        FROM wiki_links l
+        JOIN wiki_pages p ON p.page_id = l.dst_page_id
+        WHERE l.src_page_id = ?
+        ORDER BY p.page_name COLLATE NOCASE
+        """,
+        (src_page_id,),
+    ).fetchall()
+
+
+# --------------------------------------------------------------------------
+# ingest_run / ingest_doc  (dashboard telemetry)
+# --------------------------------------------------------------------------
+
+
+def start_run(conn: sqlite3.Connection, *, started_at: str | None = None) -> int:
+    cur = conn.execute(
+        "INSERT INTO ingest_run (started_at) VALUES (?)", (started_at or _now(),)
+    )
+    return int(cur.lastrowid)
+
+
+def finish_run(
+    conn: sqlite3.Connection,
+    run_id: int,
+    *,
+    total_seconds: float,
+    doc_count: int,
+    created: int,
+    merged: int,
+    skipped: int,
+    flagged: int,
+    failed: int,
+    finished_at: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        UPDATE ingest_run
+        SET finished_at = ?, total_seconds = ?, doc_count = ?, created = ?,
+            merged = ?, skipped = ?, flagged = ?, failed = ?
+        WHERE run_id = ?
+        """,
+        (
+            finished_at or _now(),
+            total_seconds,
+            doc_count,
+            created,
+            merged,
+            skipped,
+            flagged,
+            failed,
+            run_id,
+        ),
+    )
+
+
+def insert_ingest_doc(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int,
+    namespace: str,
+    filename: str,
+    path: str,
+    status: str,
+    seconds: float | None,
+    skip_reason: str | None = None,
+    error: str | None = None,
+    items_json: str = "[]",
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO ingest_doc
+            (run_id, namespace, filename, path, status, seconds, skip_reason, error, items_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (run_id, namespace, filename, path, status, seconds, skip_reason, error, items_json),
+    )
+    return int(cur.lastrowid)
+
+
+def list_runs(conn: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM ingest_run ORDER BY run_id DESC LIMIT ?", (limit,)
+    ).fetchall()
+
+
+def get_run(conn: sqlite3.Connection, run_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM ingest_run WHERE run_id = ?", (run_id,)).fetchone()
+
+
+def latest_run(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM ingest_run ORDER BY run_id DESC LIMIT 1"
+    ).fetchone()
+
+
+def list_run_docs(conn: sqlite3.Connection, run_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM ingest_doc WHERE run_id = ? ORDER BY id", (run_id,)
+    ).fetchall()
+
+
+def latest_ingest_docs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Most recent ingest_doc per (namespace, path), oldest id first.
+
+    Used to annotate raw files with their last-known outcome. Later runs win: a
+    file that failed once and later succeeded shows as ok. Returned in id order
+    so callers building their own indexes get last-write-wins for free.
+    """
+    return conn.execute(
+        """
+        SELECT d.*, r.finished_at AS run_finished_at, r.started_at AS run_started_at
+        FROM ingest_doc d
+        JOIN (
+            SELECT namespace, path, MAX(id) AS max_id
+            FROM ingest_doc GROUP BY namespace, path
+        ) latest ON latest.max_id = d.id
+        JOIN ingest_run r ON r.run_id = d.run_id
+        ORDER BY d.id
+        """
+    ).fetchall()
+
+
+def source_filenames_by_namespace(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """(namespace, filename) pairs that already have a `source` row.
+
+    Lets the dashboard mark files ingested before telemetry existed (which have
+    no ingest_doc row) as already ingested rather than pending.
+    """
+    rows = conn.execute("SELECT namespace, filename FROM source").fetchall()
+    return {(row["namespace"], row["filename"]) for row in rows}

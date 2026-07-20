@@ -41,6 +41,41 @@ CREATE TABLE IF NOT EXISTS page_aliases (
 
 CREATE INDEX IF NOT EXISTS idx_page_aliases_page ON page_aliases (page_id);
 
+-- One row per `llm-wiki ingest` invocation. Powers the dashboard's run
+-- history and the "total ingest time" figure. Independent of `source`: a run
+-- is recorded even when every document is skipped or fails.
+CREATE TABLE IF NOT EXISTS ingest_run (
+    run_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at    TEXT    NOT NULL,
+    finished_at   TEXT,                       -- NULL while a run is in flight
+    total_seconds REAL,
+    doc_count     INTEGER NOT NULL DEFAULT 0,
+    created       INTEGER NOT NULL DEFAULT 0, -- pages created across the run
+    merged        INTEGER NOT NULL DEFAULT 0, -- pages merged into
+    skipped       INTEGER NOT NULL DEFAULT 0, -- documents skipped (e.g. dup)
+    flagged       INTEGER NOT NULL DEFAULT 0, -- items flagged needs_review
+    failed        INTEGER NOT NULL DEFAULT 0  -- documents or items that errored
+);
+
+-- One row per document processed within a run. `status` is the document-level
+-- outcome; item-level detail (created/merged/flagged/errors) is kept as JSON in
+-- `items_json` so the dashboard can render a per-file log without another table.
+CREATE TABLE IF NOT EXISTS ingest_doc (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id       INTEGER NOT NULL REFERENCES ingest_run (run_id) ON DELETE CASCADE,
+    namespace    TEXT    NOT NULL,
+    filename     TEXT    NOT NULL,
+    path         TEXT    NOT NULL,
+    status       TEXT    NOT NULL CHECK (status IN ('ok', 'skipped', 'failed')),
+    seconds      REAL,
+    skip_reason  TEXT,
+    error        TEXT,
+    items_json   TEXT    NOT NULL DEFAULT '[]'
+);
+
+CREATE INDEX IF NOT EXISTS idx_ingest_doc_run ON ingest_doc (run_id);
+CREATE INDEX IF NOT EXISTS idx_ingest_doc_path ON ingest_doc (namespace, path);
+
 -- Which sources contributed to a page, and in what citation order.
 CREATE TABLE IF NOT EXISTS wiki_source (
     link_id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,3 +90,19 @@ CREATE TABLE IF NOT EXISTS wiki_source (
 );
 
 CREATE INDEX IF NOT EXISTS idx_wiki_source_wiki ON wiki_source (wiki_id);
+
+-- Directed page-to-page links discovered in page bodies: a mention of one
+-- page's name inside another page's body becomes a markdown link, recorded
+-- here. One row per (source, target) pair -- a page links to a given target at
+-- most once (its first mention) -- and re-linking a page replaces all of its
+-- rows. Both endpoints are in the same namespace.
+CREATE TABLE IF NOT EXISTS wiki_links (
+    src_page_id INTEGER NOT NULL REFERENCES wiki_pages (page_id) ON DELETE CASCADE,
+    dst_page_id INTEGER NOT NULL REFERENCES wiki_pages (page_id) ON DELETE CASCADE,
+    namespace   TEXT    NOT NULL,
+    anchor_text TEXT    NOT NULL,   -- the surface text that got linked
+    PRIMARY KEY (src_page_id, dst_page_id)
+);
+
+-- Backlinks: "which pages link to this one?"
+CREATE INDEX IF NOT EXISTS idx_wiki_links_dst ON wiki_links (dst_page_id);
