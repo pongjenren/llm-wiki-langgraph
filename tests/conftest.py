@@ -14,7 +14,7 @@ from llm_wiki.llm.schemas import ExtractedItem, ExtractionResult, Review, Summar
 
 
 class ScriptedClient:
-    """Stands in for NanobotClient.
+    """Stands in for LLMClient.
 
     Replies are looked up by step label. Subclasses override `extract_items` to
     control what each document yields.
@@ -46,7 +46,7 @@ class ScriptedClient:
     def refine_page(self) -> str:
         raise AssertionError("unexpected page refinement")
 
-    # -- NanobotClient interface -------------------------------------------
+    # -- LLMClient interface -----------------------------------------------
     async def run_json(self, prompt: str, schema, *, label: str = "step"):
         self.calls.append(label)
         if label == "summarize-decision":
@@ -88,8 +88,6 @@ def settings(workspace: Path) -> Settings:
         raw_dir=workspace / "raw",
         wiki_dir=workspace / "wiki",
         db_path=workspace / "wiki.db",
-        nanobot_config=workspace / "unused.json",
-        nanobot_workspace=workspace / "unused-ws",
     )
 
 

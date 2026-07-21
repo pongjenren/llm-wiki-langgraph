@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from llm_wiki.config import Settings
-from llm_wiki.llm.client import NanobotClient
+from llm_wiki.llm.client import LLMClient
 from llm_wiki.llm.schemas import ExtractedItem
 
 
@@ -22,7 +22,7 @@ class Deps:
     """
 
     conn: sqlite3.Connection
-    client: NanobotClient
+    client: LLMClient
     settings: Settings
 
     @property

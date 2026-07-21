@@ -5,11 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from openai import OpenAIError
 from openpyxl import Workbook
 
 from llm_wiki import loaders, pages
 from llm_wiki.db import repo
-from llm_wiki.llm.client import LLMError, NanobotClient, _extract_json
+from llm_wiki.llm.client import LLMClient, LLMError, _extract_json, query_LLM
 from llm_wiki.llm.schemas import Review
 
 
@@ -108,50 +109,47 @@ def test_extract_json_tolerates_common_model_output(raw: str):
     assert Review.model_validate(_extract_json(raw)).verdict == "pass"
 
 
-class _Bot:
-    """Returns each scripted reply in turn."""
+class _ScriptedLLM:
+    """Stands in for query_LLM: returns each reply in turn, recording prompts."""
 
     def __init__(self, replies: list[str]):
         self.replies = replies
         self.prompts: list[str] = []
 
-    async def run(self, prompt: str, **kwargs):
+    async def __call__(self, prompt: str, **kwargs):
         self.prompts.append(prompt)
-        reply = self.replies[min(len(self.prompts) - 1, len(self.replies) - 1)]
-        return type("R", (), {"content": reply, "error": None})
-
-    async def aclose(self):
-        pass
+        return self.replies[min(len(self.prompts) - 1, len(self.replies) - 1)]
 
 
-async def test_run_json_retries_and_feeds_back_the_error():
-    client = NanobotClient(retries=2)
-    bot = _Bot(["not json", '{"verdict": "maybe"}', '{"verdict": "pass", "issues": []}'])
-    client._bot = bot
+async def test_run_json_retries_and_feeds_back_the_error(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    llm = _ScriptedLLM(["not json", '{"verdict": "maybe"}', '{"verdict": "pass", "issues": []}'])
+    monkeypatch.setattr("llm_wiki.llm.client.query_LLM", llm)
 
+    client = LLMClient(retries=2)
     result = await client.run_json("review", Review, label="t")
 
     assert result.verdict == "pass"
-    assert len(bot.prompts) == 3
-    assert "was rejected" in bot.prompts[1], "the retry must tell the model what was wrong"
+    assert len(llm.prompts) == 3
+    assert "was rejected" in llm.prompts[1], "the retry must tell the model what was wrong"
 
 
-async def test_run_json_gives_up_after_the_budget():
-    client = NanobotClient(retries=1)
-    client._bot = _Bot(["nope"])
+async def test_run_json_gives_up_after_the_budget(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr("llm_wiki.llm.client.query_LLM", _ScriptedLLM(["nope"]))
+
+    client = LLMClient(retries=1)
     with pytest.raises(LLMError, match="no valid JSON"):
         await client.run_json("review", Review, label="t")
 
 
-async def test_run_text_surfaces_provider_errors():
-    class FailingBot:
-        async def run(self, prompt, **kwargs):
-            return type("R", (), {"content": "", "error": "402 insufficient credits"})
+async def test_query_llm_maps_provider_errors():
+    class FailingCompletions:
+        async def create(self, **kwargs):
+            raise OpenAIError("402 insufficient credits")
 
-        async def aclose(self):
-            pass
+    class FailingClient:
+        chat = type("Chat", (), {"completions": FailingCompletions()})()
 
-    client = NanobotClient()
-    client._bot = FailingBot()
     with pytest.raises(LLMError, match="insufficient credits"):
-        await client.run_text("hi", label="t")
+        await query_LLM("hi", client=FailingClient(), model="m", temperature=0.1, max_tokens=8, label="t")

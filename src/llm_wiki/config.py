@@ -34,15 +34,11 @@ class Settings:
     raw_dir: Path = field(default_factory=lambda: _env_path("LLM_WIKI_RAW_DIR", PROJECT_ROOT / "raw"))
     wiki_dir: Path = field(default_factory=lambda: _env_path("LLM_WIKI_WIKI_DIR", PROJECT_ROOT / "wiki"))
     db_path: Path = field(default_factory=lambda: _env_path("LLM_WIKI_DB", PROJECT_ROOT / "llm_wiki.db"))
-    nanobot_config: Path = field(
-        default_factory=lambda: _env_path("LLM_WIKI_NANOBOT_CONFIG", PROJECT_ROOT / "nanobot.config.json")
-    )
-    nanobot_workspace: Path = field(
-        default_factory=lambda: _env_path("LLM_WIKI_NANOBOT_WORKSPACE", PROJECT_ROOT / ".nanobot-workspace")
-    )
 
     # LLM
     model: str = field(default_factory=lambda: os.getenv("LLM_WIKI_MODEL", "openai/gpt-oss-120b"))
+    temperature: float = field(default_factory=lambda: _env_float("LLM_WIKI_TEMPERATURE", 0.1))
+    max_tokens: int = field(default_factory=lambda: _env_int("LLM_WIKI_MAX_TOKENS", 8192))
     json_retries: int = field(default_factory=lambda: _env_int("LLM_WIKI_JSON_RETRIES", 2))
 
     # Review loops: how many refine attempts before we give up and flag needs_review.

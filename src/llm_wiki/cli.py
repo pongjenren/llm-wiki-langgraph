@@ -16,7 +16,7 @@ from llm_wiki.config import PROJECT_ROOT, settings
 from llm_wiki.db import repo
 from llm_wiki.db.connection import connect, init_db
 from llm_wiki.graph import Deps
-from llm_wiki.llm.client import NanobotClient
+from llm_wiki.llm.client import LLMClient
 from llm_wiki.pipeline import DocumentOutcome, ingest_documents
 
 app = typer.Typer(help="Ingest raw documents into the llm-wiki knowledge base.")
@@ -29,18 +29,8 @@ def _configure_logging(verbose: bool) -> None:
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(levelname)-7s %(name)s: %(message)s",
     )
-    for noisy in ("httpx", "sentence_transformers", "transformers"):
+    for noisy in ("httpx", "openai", "sentence_transformers", "transformers"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
-
-    # nanobot logs through loguru, not stdlib logging, and is extremely chatty
-    # at DEBUG — it drowns out pipeline progress entirely. Its default sink has
-    # to be replaced rather than filtered.
-    import sys
-
-    from loguru import logger
-
-    logger.remove()
-    logger.add(sys.stderr, level="DEBUG" if verbose else "WARNING")
 
 
 def _resolve_targets(path: Optional[Path], namespace: Optional[str]) -> list[tuple[str, Path]]:
@@ -169,9 +159,9 @@ def ingest(
         try:
             init_db(conn, embedding.embedding_dim(model_name=settings.embedding_model))
             start = time.monotonic()
-            async with NanobotClient() as client:
-                deps = Deps(conn=conn, client=client, settings=settings)
-                outcomes = await ingest_documents(deps, targets)
+            client = LLMClient()
+            deps = Deps(conn=conn, client=client, settings=settings)
+            outcomes = await ingest_documents(deps, targets)
             elapsed = time.monotonic() - start
             try:
                 telemetry.record_run(conn, outcomes, elapsed)

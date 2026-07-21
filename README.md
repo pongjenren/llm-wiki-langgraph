@@ -2,8 +2,7 @@
 
 An ingest pipeline that turns raw documents into a cross-referenced wiki.
 [LangGraph](https://github.com/langchain-ai/langgraph) drives the flow; every LLM
-step runs through [nanobot](https://github.com/HKUDS/nanobot), which calls
-`openai/gpt-oss-120b` via OpenRouter.
+step calls `openai/gpt-oss-120b` directly via OpenRouter (`llm_wiki.llm.query_LLM`).
 
 ## How it works
 
@@ -164,7 +163,7 @@ src/llm_wiki/
   pipeline.py     drives both graphs per document
   config.py       env-backed settings
   graph/          doc_graph (stage 1), item_graph (stage 2), shared state
-  llm/            nanobot client, prompts, reply schemas
+  llm/            OpenRouter client, prompts, reply schemas
   db/             schema.sql, connection/bootstrap, query helpers
   loaders/        extension-dispatched text extraction
   pages.py        markdown page + index writing, merge validation
@@ -172,7 +171,6 @@ src/llm_wiki/
   embedding.py    local sentence-transformers
   telemetry.py    records ingest runs/docs for the dashboard
   dashboard/      read-only ingest status web page (starlette + jinja2)
-nanobot.config.json   provider, model preset, tools (all disabled)
 ```
 
 Adding a file format means writing one function and registering it in

@@ -1,5 +1,5 @@
-"""LLM layer: nanobot client, prompts, and the schemas its replies must satisfy."""
+"""LLM layer: OpenRouter client, prompts, and the schemas its replies must satisfy."""
 
-from llm_wiki.llm.client import LLMError, NanobotClient
+from llm_wiki.llm.client import LLMClient, LLMError, query_LLM
 
-__all__ = ["LLMError", "NanobotClient"]
+__all__ = ["LLMClient", "LLMError", "query_LLM"]

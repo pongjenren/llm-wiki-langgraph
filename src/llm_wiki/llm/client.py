@@ -1,24 +1,28 @@
-"""nanobot-backed LLM client.
+"""Direct OpenRouter-backed LLM client.
 
-Every LLM step in the ingest pipeline goes through here. nanobot has no
-structured-output mode, so `run_json` asks for JSON in the prompt, validates the
-reply against a Pydantic model, and re-prompts with the validation error when it
-does not conform.
+Every LLM step in the ingest pipeline goes through here. `query_LLM` makes a
+single OpenRouter chat/completions call; `LLMClient` wraps it with the
+pipeline's cross-cutting concerns. OpenRouter's `openai/gpt-oss-120b` is not
+prompted for structured output, so `run_json` asks for JSON in the prompt,
+validates the reply against a Pydantic model, and re-prompts with the
+validation error when it does not conform.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import uuid
 from typing import Any, TypeVar
 
 import json_repair
+from openai import AsyncOpenAI, OpenAIError
 from pydantic import BaseModel, ValidationError
 
 from llm_wiki.config import settings
 
 T = TypeVar("T", bound=BaseModel)
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
@@ -31,7 +35,7 @@ code fence. It must validate against this JSON schema:
 
 
 class LLMError(RuntimeError):
-    """A nanobot run failed, or never produced a valid response."""
+    """An LLM call failed, or never produced a valid response."""
 
 
 def _extract_json(text: str) -> Any:
@@ -53,55 +57,70 @@ def _extract_json(text: str) -> Any:
         return repaired
 
 
-class NanobotClient:
-    """Async wrapper over the nanobot SDK.
+async def query_LLM(
+    prompt: str,
+    *,
+    client: AsyncOpenAI,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    label: str = "step",
+) -> str:
+    """Make one OpenRouter chat/completions call and return the reply text.
 
-    Each call runs with `ephemeral=True` under a fresh session key: pipeline
-    steps must not see each other's history, or an earlier document's entities
-    leak into a later extraction.
+    Pipeline steps must not see each other's history, so each call is a fresh,
+    single-message request with no shared conversation state.
+    """
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    except OpenAIError as exc:
+        raise LLMError(f"{label}: LLM call failed: {exc}") from exc
+
+    content = response.choices[0].message.content if response.choices else None
+    if not content or not content.strip():
+        raise LLMError(f"{label}: LLM returned an empty response")
+    return content.strip()
+
+
+class LLMClient:
+    """Async client over OpenRouter's chat/completions API.
+
+    Holds one `AsyncOpenAI` instance (and its connection pool) for reuse across
+    pipeline steps. `run_json` and `run_text` are the interface the graph nodes
+    depend on; tests swap this object out wholesale.
     """
 
     def __init__(
         self,
         *,
-        config_path: Any = None,
-        workspace: Any = None,
         model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         retries: int | None = None,
     ) -> None:
-        self._config_path = config_path or settings.nanobot_config
-        self._workspace = workspace or settings.nanobot_workspace
         self._model = model or settings.model
+        self._temperature = settings.temperature if temperature is None else temperature
+        self._max_tokens = settings.max_tokens if max_tokens is None else max_tokens
         self._retries = settings.json_retries if retries is None else retries
-        self._bot: Any = None
-
-    async def __aenter__(self) -> "NanobotClient":
-        from nanobot.nanobot import Nanobot
-
-        self._workspace.mkdir(parents=True, exist_ok=True)
-        self._bot = Nanobot.from_config(self._config_path, workspace=self._workspace)
-        return self
-
-    async def __aexit__(self, *exc: object) -> None:
-        if self._bot is not None:
-            await self._bot.aclose()
-            self._bot = None
+        self._client = AsyncOpenAI(
+            base_url=OPENROUTER_BASE_URL,
+            api_key=settings.openrouter_api_key,
+        )
 
     async def run_text(self, prompt: str, *, label: str = "step") -> str:
-        if self._bot is None:
-            raise LLMError("NanobotClient used outside its async context manager")
-
-        result = await self._bot.run(
+        return await query_LLM(
             prompt,
-            session_key=f"llm-wiki:{label}:{uuid.uuid4()}",
-            ephemeral=True,
+            client=self._client,
             model=self._model,
+            temperature=self._temperature,
+            max_tokens=self._max_tokens,
+            label=label,
         )
-        if result.error:
-            raise LLMError(f"{label}: nanobot run failed: {result.error}")
-        if not result.content or not result.content.strip():
-            raise LLMError(f"{label}: nanobot returned an empty response")
-        return result.content.strip()
 
     async def run_json(self, prompt: str, schema: type[T], *, label: str = "step") -> T:
         """Run a prompt and parse the reply into `schema`, retrying on invalid output."""
