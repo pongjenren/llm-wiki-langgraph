@@ -23,8 +23,8 @@ class ExtractedItem(BaseModel):
     name: str = Field(description="Canonical display name.")
     type: PageType
     description: str = Field(
-        description="Self-contained description of this item as supported by the document, "
-        "citing the source as [CURRENT]."
+        description="Self-contained description of this item, containing only facts the "
+        "document supports and no citation markers."
     )
     aliases: list[str] = Field(
         default_factory=list,

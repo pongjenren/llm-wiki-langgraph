@@ -23,8 +23,6 @@ _REFERENCES_SECTION = re.compile(
 _CITATION = re.compile(r"\[(\d+)\]")
 _HEADING = re.compile(r"^#{2,6}\s+(.+?)\s*$", re.MULTILINE)
 
-CURRENT_MARKER = "[CURRENT]"
-
 # The banner prepended to a page that failed review. Kept as a constant so the
 # link pass can strip it before rewriting and let write_page re-add it.
 REVIEW_BANNER = "> [!warning]\n> This page did not pass review and needs a human check.\n"
@@ -42,11 +40,6 @@ def slugify(page_name: str) -> str:
 
 def page_path(wiki_dir: Path, namespace: str, page_name: str) -> Path:
     return wiki_dir / namespace / f"{slugify(page_name)}.md"
-
-
-def substitute_current(text: str, reference_number: int) -> str:
-    """Replace the [CURRENT] placeholder with the real reference number."""
-    return text.replace(CURRENT_MARKER, f"[{reference_number}]")
 
 
 def strip_references(markdown: str) -> str:

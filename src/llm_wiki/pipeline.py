@@ -73,7 +73,6 @@ async def ingest_document(deps: Deps, namespace: str, path: Path) -> DocumentOut
                         "namespace": namespace,
                         "source_id": doc_state["source_id"],
                         "item": item,
-                        "item_attempts": 0,
                         "page_attempts": 0,
                         "needs_review": False,
                     }

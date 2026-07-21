@@ -53,6 +53,10 @@ class DocState(TypedDict, total=False):
     working_text: str
     items: list[ExtractedItem]
 
+    # Extraction review loop
+    extraction_attempts: int
+    extraction_issues: list[str]
+
 
 class ItemState(TypedDict, total=False):
     """Stage 2: one item is folded into a new or existing page."""
@@ -61,10 +65,6 @@ class ItemState(TypedDict, total=False):
     namespace: str
     source_id: int
     item: ExtractedItem
-
-    # Item review loop
-    item_attempts: int
-    item_issues: list[str]
 
     # Entity resolution
     page_id: int

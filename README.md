@@ -15,23 +15,26 @@ compiled code via `uv run llm-wiki graph`.
 ```
 raw file → load → SHA256 check ─┬─ already ingested → stop
                                 └─ new → summarize? ─┬─ yes → summarize ─┐
-                                                     └─ no ─────────────┴→ extract items
+                                                     └─ no ──────────────┴→ extract
+                                                                             ↓
+                                            review extraction ─fail→ refine ─┐
+                                                   │  ↑──────────────────────┘
+                                                   pass → record source → items
 ```
 
 The SHA is taken over the file's raw bytes, so re-running never reprocesses an
 unchanged document. Whether to summarize is the model's call: a spreadsheet or
 log gets rewritten into descriptive prose first, while text that is already prose
-goes straight to extraction. The source row is written only after extraction
-succeeds, so a document that fails partway can be retried.
+goes straight to extraction. Extraction quality is settled here, against the
+source: `review_extraction` checks the whole item list for recall, precision,
+type, and aliases, and `refine_extraction` rebuilds it — adding missing items,
+**dropping** spurious ones, and fixing the rest. The source row is written only
+after this review succeeds, so a document that fails partway can be retried.
 
 **Stage 2 — item → page** (`graph/item_graph.py`)
 
 ```
-item → review ─fail→ refine ─┐
-         │  ↑────────────────┘
-         pass
-         ↓
-     does the entity exist?
+item → does the entity exist?
       ├─ no  → insert page → reference [1] → create page
       └─ yes → link source → reference [N] → merge into existing page
                                      ↓
@@ -42,15 +45,18 @@ item → review ─fail→ refine ─┐
                     write .md + index.md, update db
 ```
 
-Items are processed one at a time. That is what makes reference numbering and
-entity resolution safe — two items naming the same entity would otherwise race to
-create two pages for it.
+Items arrive already vetted by stage 1, so stage 2 has no per-item review and
+goes straight to entity resolution. Items are processed one at a time. That is
+what makes reference numbering and entity resolution safe — two items naming the
+same entity would otherwise race to create two pages for it.
 
-**Citations.** While an item is being processed we do not yet know which
-reference number its source will get on the target page, so the model always
-writes `[CURRENT]`. Once `wiki_source` assigns the number, `[CURRENT]` is
-substituted for `[N]`. The References section itself is generated from the
-database on every write, so the model never renumbers existing citations.
+**Citations.** Every fact in an item's description comes from the one document it
+was extracted from, so the reference number is uniform across the description and
+is not known until the source is linked to a page. Extraction therefore produces
+plain facts with no markers; `create_page` / `merge_page` are told the assigned
+number and attach `[N]` to the claims they write. The References section itself
+is generated from the database on every write, so the model never renumbers
+existing citations.
 
 **Entity resolution** is two-stage: an exact lookup in `page_aliases` (names are
 casefolded and whitespace-collapsed), then a vector search over page names. A

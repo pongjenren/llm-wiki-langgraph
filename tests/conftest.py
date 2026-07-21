@@ -28,14 +28,14 @@ class ScriptedClient:
     def extract_items(self, document_index: int) -> list[ExtractedItem]:
         raise NotImplementedError
 
-    def item_review(self) -> Review:
+    def extraction_review(self) -> Review:
         return Review(verdict="pass", issues=[])
+
+    def extraction_refine(self, document_index: int) -> ExtractionResult:
+        raise AssertionError("unexpected extraction refinement")
 
     def page_review(self) -> Review:
         return Review(verdict="pass", issues=[])
-
-    def item_refine(self) -> ExtractedItem:
-        raise AssertionError("unexpected item refinement")
 
     def create_page(self) -> str:
         return "# Page\n\nA claim [1].\n"
@@ -54,10 +54,10 @@ class ScriptedClient:
         if label == "extract":
             self.documents_seen += 1
             return ExtractionResult(items=self.extract_items(self.documents_seen))
-        if label == "item-review":
-            return self.item_review()
-        if label == "item-refine":
-            return self.item_refine()
+        if label == "extraction-review":
+            return self.extraction_review()
+        if label == "extraction-refine":
+            return self.extraction_refine(self.documents_seen)
         if label == "page-review":
             return self.page_review()
         raise AssertionError(f"unscripted run_json label: {label}")

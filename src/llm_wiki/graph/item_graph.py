@@ -25,23 +25,6 @@ def build_item_graph(deps: Deps):
     """Compile the stage-2 graph."""
     settings = deps.settings
 
-    async def review_item(state: ItemState) -> ItemState:
-        review = await deps.client.run_json(
-            prompts.review_item(state["item"]), Review, label="item-review"
-        )
-        if review.verdict == "pass":
-            return {"item_issues": []}
-        log.info("item review failed for %r: %s", state["item"].name, review.issues)
-        return {"item_issues": review.issues}
-
-    async def refine_item(state: ItemState) -> ItemState:
-        refined = await deps.client.run_json(
-            prompts.refine_item(state["item"], state["item_issues"]),
-            ExtractedItem,
-            label="item-refine",
-        )
-        return {"item": refined, "item_attempts": state.get("item_attempts", 0) + 1}
-
     async def resolve_entity(state: ItemState) -> ItemState:
         """Find the page this item belongs to: exact alias first, then vectors."""
         item = state["item"]
@@ -102,11 +85,8 @@ def build_item_graph(deps: Deps):
                 deps.conn, wiki_id=page_id, source_id=state["source_id"], namespace=namespace
             )
 
-        numbered = item.model_copy(
-            update={"description": pages.substitute_current(item.description, reference_number)}
-        )
         body = await deps.client.run_text(
-            prompts.create_page(numbered, reference_number), label="create-page"
+            prompts.create_page(item, reference_number), label="create-page"
         )
         return {
             "page_id": page_id,
@@ -129,11 +109,8 @@ def build_item_graph(deps: Deps):
             )
 
         existing_body = pages.read_page(deps.wiki_dir, namespace, state["page_name"])
-        numbered = item.model_copy(
-            update={"description": pages.substitute_current(item.description, reference_number)}
-        )
 
-        prompt = prompts.merge_page(numbered, existing_body, reference_number)
+        prompt = prompts.merge_page(item, existing_body, reference_number)
         merged = ""
         problems: list[str] = []
 
@@ -148,7 +125,7 @@ def build_item_graph(deps: Deps):
                 break
             log.info("merge validation failed for %r: %s", state["page_name"], problems)
             prompt = (
-                f"{prompts.merge_page(numbered, existing_body, reference_number)}\n\n"
+                f"{prompts.merge_page(item, existing_body, reference_number)}\n\n"
                 f"Your previous merge was rejected: {pages.format_issues(problems)}\n"
                 "Produce the merged page again, preserving everything named above."
             )
@@ -201,22 +178,6 @@ def build_item_graph(deps: Deps):
         log.info("wrote %s%s", path, " (needs review)" if needs_review else "")
         return {"written_path": str(path)}
 
-    def after_item_review(state: ItemState) -> str:
-        if not state.get("item_issues"):
-            return "resolve"
-        if state.get("item_attempts", 0) >= settings.review_retries:
-            log.warning(
-                "item %r still failing review after %d refine attempt(s); flagging",
-                state["item"].name,
-                state.get("item_attempts", 0),
-            )
-            return "give_up"
-        return "refine"
-
-    async def flag_item(state: ItemState) -> ItemState:
-        """Item review never passed: carry on, but mark the page for a human."""
-        return {"needs_review": True}
-
     def after_resolve(state: ItemState) -> str:
         return "create" if state.get("is_new_page") else "merge"
 
@@ -236,9 +197,6 @@ def build_item_graph(deps: Deps):
         return {"needs_review": True}
 
     graph = StateGraph(ItemState)
-    graph.add_node("review_item", review_item)
-    graph.add_node("refine_item", refine_item)
-    graph.add_node("flag_item", flag_item)
     graph.add_node("resolve_entity", resolve_entity)
     graph.add_node("create_page", create_page)
     graph.add_node("merge_page", merge_page)
@@ -247,15 +205,7 @@ def build_item_graph(deps: Deps):
     graph.add_node("flag_page", flag_page)
     graph.add_node("persist", persist)
 
-    graph.add_edge(START, "review_item")
-    graph.add_conditional_edges(
-        "review_item",
-        after_item_review,
-        {"resolve": "resolve_entity", "refine": "refine_item", "give_up": "flag_item"},
-    )
-    graph.add_edge("refine_item", "review_item")
-    graph.add_edge("flag_item", "resolve_entity")
-
+    graph.add_edge(START, "resolve_entity")
     graph.add_conditional_edges(
         "resolve_entity", after_resolve, {"create": "create_page", "merge": "merge_page"}
     )

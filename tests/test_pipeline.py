@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from llm_wiki.llm.schemas import ExtractedItem, Review
+from llm_wiki.llm.schemas import ExtractedItem, ExtractionResult, Review
 from llm_wiki.pipeline import ingest_document
 from tests.conftest import ScriptedClient
 
@@ -51,7 +51,7 @@ class TransformerClient(ScriptedClient):
                 ExtractedItem(
                     name="Transformer",
                     type="concept",
-                    description="Built on self-attention [CURRENT].",
+                    description="Built on self-attention.",
                     aliases=["Transformer architecture"],
                 )
             ]
@@ -59,7 +59,7 @@ class TransformerClient(ScriptedClient):
             ExtractedItem(
                 name="Transformer",
                 type="concept",
-                description="Scales predictably with parameter count [CURRENT].",
+                description="Scales predictably with parameter count.",
             )
         ]
 
@@ -92,7 +92,6 @@ async def test_new_document_creates_page(make_deps, docs, settings, conn):
     body = (settings.wiki_dir / "ml" / "Transformer.md").read_text(encoding="utf-8")
     assert "[1]" in body
     assert "## References" in body and "doc1.md" in body
-    assert "[CURRENT]" not in body
     assert (settings.wiki_dir / "ml" / "index.md").exists()
 
 
@@ -174,36 +173,12 @@ async def test_merge_that_never_recovers_is_flagged(make_deps, docs, conn, setti
     assert "needs a human check" in body
 
 
-class NeverPassesReviewClient(TransformerClient):
-    """Item review always fails and refinement never improves it."""
-
-    def item_review(self) -> Review:
-        return Review(verdict="fail", issues=["description says nothing substantive"])
-
-    def item_refine(self) -> ExtractedItem:
-        return ExtractedItem(
-            name="Transformer", type="concept", description="A thing [CURRENT]."
-        )
-
-
-async def test_item_failing_review_is_written_but_flagged(make_deps, docs, conn, settings):
-    client = NeverPassesReviewClient()
-    deps = make_deps(client)
-    outcome = await ingest_document(deps, "ml", docs[0])
-
-    assert client.count("item-refine") == settings.review_retries
-    assert outcome.items[0].written_path is not None, "the page is still written"
-    assert outcome.items[0].needs_review
-    assert conn.execute("SELECT needs_review FROM wiki_pages").fetchone()["needs_review"] == 1
-    assert "needs review" in (settings.wiki_dir / "ml" / "index.md").read_text(encoding="utf-8")
-
-
 class VariantNameClient(ScriptedClient):
     """The same entity appears under a singular and a plural name."""
 
     def extract_items(self, document_index: int) -> list[ExtractedItem]:
         name = "Self-attention network" if document_index == 1 else "Self-attention networks"
-        return [ExtractedItem(name=name, type="concept", description=f"Described [CURRENT].")]
+        return [ExtractedItem(name=name, type="concept", description=f"Described.")]
 
     def create_page(self) -> str:
         return "# Self-attention network\n\nProcesses sequences in parallel [1].\n"
@@ -232,7 +207,7 @@ async def test_name_variants_resolve_to_one_page(make_deps, doc, conn):
 class DistinctEntitiesClient(ScriptedClient):
     def extract_items(self, document_index: int) -> list[ExtractedItem]:
         name = "Transformer" if document_index == 1 else "Convolutional neural network"
-        return [ExtractedItem(name=name, type="concept", description="Described [CURRENT].")]
+        return [ExtractedItem(name=name, type="concept", description="Described.")]
 
 
 async def test_distinct_entities_get_separate_pages(make_deps, doc, conn):
@@ -252,8 +227,8 @@ class TwoItemsSamePageClient(ScriptedClient):
 
     def extract_items(self, document_index: int) -> list[ExtractedItem]:
         return [
-            ExtractedItem(name="Transformer", type="concept", description="First [CURRENT]."),
-            ExtractedItem(name="Transformer", type="concept", description="Second [CURRENT]."),
+            ExtractedItem(name="Transformer", type="concept", description="First."),
+            ExtractedItem(name="Transformer", type="concept", description="Second."),
         ]
 
     def create_page(self) -> str:
@@ -275,7 +250,7 @@ async def test_two_items_from_one_document_share_a_reference(make_deps, doc, con
 
 
 class FailingItemClient(TransformerClient):
-    def item_review(self) -> Review:
+    def page_review(self) -> Review:
         raise RuntimeError("provider exploded")
 
 
@@ -285,6 +260,59 @@ async def test_item_error_is_contained(make_deps, docs):
     assert not outcome.ok
     assert outcome.items[0].error is not None
     assert outcome.items[0].needs_review
+
+
+class SpuriousExtractionClient(TransformerClient):
+    """Extraction over-produces; the extraction review drops the bad item."""
+
+    def extract_items(self, document_index: int) -> list[ExtractedItem]:
+        return [
+            ExtractedItem(name="Transformer", type="concept", description="Built on attention."),
+            ExtractedItem(name="Passing mention", type="entity", description="Mentioned once."),
+        ]
+
+    def extraction_review(self) -> Review:
+        # Fails the first look, passes once the spurious item has been dropped.
+        if self.count("extraction-refine") == 0:
+            return Review(verdict="fail", issues=["'Passing mention' is only mentioned in passing"])
+        return Review(verdict="pass", issues=[])
+
+    def extraction_refine(self, document_index: int) -> ExtractionResult:
+        return ExtractionResult(
+            items=[
+                ExtractedItem(
+                    name="Transformer", type="concept", description="Built on attention."
+                )
+            ]
+        )
+
+
+async def test_extraction_review_drops_spurious_item(make_deps, docs, conn):
+    client = SpuriousExtractionClient()
+    outcome = await ingest_document(make_deps(client), "ml", docs[0])
+
+    assert client.count("extraction-refine") == 1
+    assert [item.name for item in outcome.items] == ["Transformer"], "the spurious item is gone"
+    assert conn.execute("SELECT COUNT(*) AS n FROM wiki_pages").fetchone()["n"] == 1
+
+
+class UnrecoverableExtractionClient(TransformerClient):
+    """Extraction review never passes; after the retries we proceed as-is."""
+
+    def extraction_review(self) -> Review:
+        return Review(verdict="fail", issues=["still not right"])
+
+    def extraction_refine(self, document_index: int) -> ExtractionResult:
+        return ExtractionResult(items=self.extract_items(document_index))
+
+
+async def test_extraction_review_gives_up_after_retries(make_deps, docs, settings, conn):
+    client = UnrecoverableExtractionClient()
+    outcome = await ingest_document(make_deps(client), "ml", docs[0])
+
+    assert client.count("extraction-refine") == settings.review_retries
+    assert outcome.ok, "a document that exhausts extraction review is still ingested"
+    assert conn.execute("SELECT COUNT(*) AS n FROM source").fetchone()["n"] == 1
 
 
 class ExtractionFailsClient(TransformerClient):

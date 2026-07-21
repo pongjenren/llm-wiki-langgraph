@@ -1,20 +1,15 @@
 """Prompt builders for each LLM step.
 
-Citation convention: while a document is being processed we do not yet know
-which reference number it will get on a given page, so the model always writes
-citations as the literal marker [CURRENT]. The pipeline substitutes the real
-number once the source is linked to the page.
+Citation convention: extraction produces plain facts with no reference markers.
+Every fact in a single item's description comes from the one document it was
+extracted from, so the reference number is uniform across the description and is
+not known until the source is linked to a page. The create/merge step is told
+that number and attaches it to the claims it writes.
 """
 
 from __future__ import annotations
 
 from llm_wiki.llm.schemas import ExtractedItem
-
-CITATION_RULE = (
-    "Cite the document you were given as the literal marker [CURRENT]. "
-    "Never invent a numeric citation such as [1]; only [CURRENT] and citation "
-    "numbers already present in existing page text are allowed."
-)
 
 
 def summarize_decision(filename: str, text: str) -> str:
@@ -71,7 +66,8 @@ Rules:
   merely mentioned in passing.
 - Each description must stand on its own without the document at hand, and must
   only contain facts this document supports.
-- {CITATION_RULE}
+- State facts plainly. Do not add any citation or reference markers; references
+  are attached later when the page is written.
 - Prefer the most canonical form of each name; put spelling variants and
   abbreviations used in the document into `aliases`.
 
@@ -84,51 +80,90 @@ Document:
 """.strip()
 
 
-def review_item(item: ExtractedItem) -> str:
-    return f"""
-Review one extracted knowledge-base item for quality.
+def _render_items(items: list[ExtractedItem]) -> str:
+    if not items:
+        return "(no items extracted)"
+    blocks = []
+    for index, item in enumerate(items, 1):
+        aliases = ", ".join(item.aliases) or "(none)"
+        blocks.append(
+            f"{index}. name: {item.name}\n"
+            f"   type: {item.type}\n"
+            f"   aliases: {aliases}\n"
+            f"   description: {item.description}"
+        )
+    return "\n\n".join(blocks)
 
-Fail it if any of these hold:
-- The name is vague, generic, or is not a nameable entity or concept.
-- The `type` is wrong for what the item actually is.
-- The description is empty, circular, or says nothing substantive.
-- The description contains claims the item's own text does not support.
-- The description is missing the [CURRENT] citation marker.
-- The aliases include names that refer to something different.
+
+def review_extraction(filename: str, text: str, items: list[ExtractedItem]) -> str:
+    return f"""
+Review the entities and concepts extracted from a document, checking the list
+against the document itself.
+
+Fail the extraction if any of these hold:
+- An entity or concept the document says something substantive about is missing
+  from the list.
+- An item is included that the document only mentions in passing, or that is not
+  a nameable entity or concept.
+- An item's `type` is wrong (entity vs concept).
+- A description contains claims the document does not support.
+- A description leaves out substantive facts the document states about that item.
+- An item's aliases include a name that refers to a different entity.
+- Two items are really the same thing, or the same item appears twice.
 
 Otherwise pass it.
 
-Item:
----
-name: {item.name}
-type: {item.type}
-aliases: {", ".join(item.aliases) or "(none)"}
+Filename: {filename}
 
-{item.description}
+Document:
+---
+{text}
+---
+
+Extracted items:
+---
+{_render_items(items)}
 ---
 """.strip()
 
 
-def refine_item(item: ExtractedItem, issues: list[str]) -> str:
+def refine_extraction(filename: str, text: str, items: list[ExtractedItem], issues: list[str]) -> str:
     bullets = "\n".join(f"- {issue}" for issue in issues) or "- (unspecified)"
     return f"""
-Revise this knowledge-base item to fix the problems found in review.
+Revise the list of entities and concepts extracted from a document to fix the
+problems found in review. Work from the document itself.
 
 Problems:
 {bullets}
 
 Rules:
-- Fix only what the problems call for; keep everything else as it is.
-- Do not add facts beyond what the original description supports.
-- {CITATION_RULE}
+- Add any entity or concept the document says something substantive about that is
+  missing from the list.
+- Remove items that are only mentioned in passing, are not nameable entities or
+  concepts, or duplicate another item.
+- Fix wrong `type` values and descriptions that claim more than the document
+  supports.
+- Extend each description with substantive facts the document states about the
+  item that it currently leaves out.
+- Remove any alias that refers to a different entity than the item.
+- Each description must stand on its own without the document at hand, and must
+  only contain facts this document supports.
+- State facts plainly, with no citation or reference markers.
+- Prefer the most canonical form of each name; put spelling variants and
+  abbreviations used in the document into `aliases`.
 
-Item:
+Return the complete corrected list of items, not only the changes.
+
+Filename: {filename}
+
+Document:
 ---
-name: {item.name}
-type: {item.type}
-aliases: {", ".join(item.aliases) or "(none)"}
+{text}
+---
 
-{item.description}
+Current items:
+---
+{_render_items(items)}
 ---
 """.strip()
 
@@ -145,7 +180,8 @@ Format:
 
 Rules:
 - Use only facts from the material below. Do not add outside knowledge.
-- Cite the source as [{reference_number}] on the claims it supports.
+- All of the material below comes from a single source, cited as
+  [{reference_number}]. Add [{reference_number}] to every claim it supports.
 
 Material:
 ---
@@ -163,7 +199,8 @@ Integrate new material into an existing wiki page.
 Rules:
 - Preserve every existing citation marker such as [1] or [2] on the claims that
   carry them. Never renumber them.
-- Cite the new material as [{reference_number}].
+- All of the new material comes from a single source; cite it as
+  [{reference_number}] on every claim it supports.
 - Keep all existing sections. You may add sections, extend prose, and reorder
   for coherence, but do not drop existing content.
 - Where the new material conflicts with existing content, state both and

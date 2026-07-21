@@ -63,11 +63,6 @@ def test_namespace_comes_from_directory_name(tmp_path: Path):
 
 
 # -------------------------------------------------------------------- pages
-def test_substitute_current_replaces_every_marker():
-    text = "A [CURRENT] and B [CURRENT]."
-    assert pages.substitute_current(text, 3) == "A [3] and B [3]."
-
-
 def test_strip_references_removes_a_model_written_section():
     body = "# T\n\nBody [1].\n\n## References\n\n1. doc.md\n"
     assert "## References" not in pages.strip_references(body)
