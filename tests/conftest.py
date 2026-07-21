@@ -10,7 +10,13 @@ from llm_wiki import embedding
 from llm_wiki.config import Settings
 from llm_wiki.db.connection import connect, init_db
 from llm_wiki.graph import Deps
-from llm_wiki.llm.schemas import ExtractedItem, ExtractionResult, Review, SummarizeDecision
+from llm_wiki.llm.schemas import (
+    ExtractedItem,
+    ExtractionResult,
+    ResolveDecision,
+    Review,
+    SummarizeDecision,
+)
 
 
 class ScriptedClient:
@@ -30,6 +36,10 @@ class ScriptedClient:
 
     def extraction_review(self) -> Review:
         return Review(verdict="pass", issues=[])
+
+    def resolve(self) -> ResolveDecision:
+        # Default: none of the candidates is the same entity, so a new page is made.
+        return ResolveDecision(matched_page_id=None, reason="no match")
 
     def extraction_refine(self, document_index: int) -> ExtractionResult:
         raise AssertionError("unexpected extraction refinement")
@@ -60,6 +70,8 @@ class ScriptedClient:
             return self.extraction_refine(self.documents_seen)
         if label == "page-review":
             return self.page_review()
+        if label == "resolve":
+            return self.resolve()
         raise AssertionError(f"unscripted run_json label: {label}")
 
     async def run_text(self, prompt: str, *, label: str = "step") -> str:

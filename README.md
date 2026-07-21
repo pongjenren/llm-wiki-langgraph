@@ -58,12 +58,18 @@ number and attach `[N]` to the claims they write. The References section itself
 is generated from the database on every write, so the model never renumbers
 existing citations.
 
-**Entity resolution** is two-stage: an exact lookup in `page_aliases` (names are
-casefolded and whitespace-collapsed), then a vector search over page names. A
-similarity hit is recorded as an `embedding_sim` alias, so the next lookup for
-that name is an exact hit. Only the *name* is embedded — mixing the description
-in measures topical similarity rather than identity, which was enough to split
-"Self-attention network" and "Self-attention networks" into two pages.
+**Entity resolution** is a funnel. First an exact lookup in `page_aliases` (names
+are casefolded and whitespace-collapsed). On a miss, candidates are gathered from
+*two* signals — a vector search over page names (only the *name* is embedded;
+mixing the description in measures topical similarity rather than identity) and
+string matching over existing aliases (rapidfuzz `token_sort_ratio`, which catches
+typos, plurals and casing the embeddings rank too far apart). A near-exact match
+on either signal is accepted outright; otherwise the candidates, together with the
+item's aliases and description, are handed to an LLM that decides whether it is the
+same entity or a new one. However a name resolves, it is recorded as an alias
+(`embedding_sim` / `string_sim` / `llm_sim`) so the next lookup for that name is an
+exact hit — which also lets the LLM's verdicts converge over time. A low-confidence
+LLM match still merges but flags the page for review.
 
 **Merges are verified.** The merge step asks for a full rewrite of the page, so
 the result is checked programmatically: every citation marker and every section

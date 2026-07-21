@@ -9,7 +9,12 @@ that number and attaches it to the claims it writes.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Sequence
+
 from llm_wiki.llm.schemas import ExtractedItem
+
+if TYPE_CHECKING:
+    from llm_wiki.db.repo import PageCandidate
 
 
 def summarize_decision(filename: str, text: str) -> str:
@@ -93,6 +98,34 @@ def _render_items(items: list[ExtractedItem]) -> str:
             f"   description: {item.description}"
         )
     return "\n\n".join(blocks)
+
+
+def resolve_entity(item: ExtractedItem, candidates: Sequence[PageCandidate]) -> str:
+    aliases = ", ".join(item.aliases) or "(none)"
+    listing = "\n".join(
+        f"- page_id {c.page_id}: {c.page_name} (type: {c.type})" for c in candidates
+    )
+    return f"""
+Decide whether a newly extracted {item.type} is the SAME real-world thing as one
+of the existing wiki pages listed below, or something new.
+
+New item:
+- name: {item.name}
+- type: {item.type}
+- aliases: {aliases}
+- description: {item.description}
+
+Existing candidate pages:
+{listing}
+
+Rules:
+- Return the page_id of the one candidate that denotes the SAME entity or concept.
+- Merely related pages, or pages about the same broad topic, are NOT the same
+  thing. A part is not its whole; a member is not its category.
+- When no candidate is clearly the same thing, set matched_page_id to null so a
+  new page is created. When in doubt, prefer null.
+- Use confidence "low" when a match is plausible but you are not certain.
+""".strip()
 
 
 def review_extraction(filename: str, text: str, items: list[ExtractedItem]) -> str:

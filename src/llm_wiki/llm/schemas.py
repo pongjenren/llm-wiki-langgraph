@@ -36,6 +36,21 @@ class ExtractionResult(BaseModel):
     items: list[ExtractedItem] = Field(default_factory=list)
 
 
+class ResolveDecision(BaseModel):
+    """Whether a newly extracted item is one of the existing candidate pages."""
+
+    matched_page_id: int | None = Field(
+        default=None,
+        description="page_id of the candidate that is the SAME entity/concept, "
+        "or null to create a new page.",
+    )
+    confidence: Literal["high", "low"] = Field(
+        default="high",
+        description="'low' when the match is plausible but uncertain; it flags the page for review.",
+    )
+    reason: str = Field(description="One sentence justification.")
+
+
 class Review(BaseModel):
     """Outcome of a review step."""
 

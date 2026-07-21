@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS page_aliases (
     namespace  TEXT    NOT NULL,
     query_name TEXT    NOT NULL,
     page_id    INTEGER NOT NULL REFERENCES wiki_pages (page_id) ON DELETE CASCADE,
-    type       TEXT    NOT NULL CHECK (type IN ('canonical', 'embedding_sim', 'manual')),
+    type       TEXT    NOT NULL CHECK (type IN ('canonical', 'alias', 'embedding_sim', 'string_sim', 'llm_sim', 'manual')),
     PRIMARY KEY (namespace, query_name)
 );
 

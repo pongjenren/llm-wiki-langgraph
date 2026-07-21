@@ -14,9 +14,10 @@ from langgraph.graph import END, START, StateGraph
 from llm_wiki import embedding, pages
 from llm_wiki.db import repo
 from llm_wiki.db.connection import transaction
+from llm_wiki.db.repo import PageCandidate
 from llm_wiki.graph.state import Deps, ItemState
 from llm_wiki.llm import prompts
-from llm_wiki.llm.schemas import ExtractedItem, Review
+from llm_wiki.llm.schemas import ExtractedItem, ResolveDecision, Review
 
 log = logging.getLogger(__name__)
 
@@ -25,46 +26,132 @@ def build_item_graph(deps: Deps):
     """Compile the stage-2 graph."""
     settings = deps.settings
 
+    def _strong_signal(
+        emb: list[PageCandidate], strings: list[PageCandidate]
+    ) -> PageCandidate | None:
+        """A near-exact match on either signal, accepted without asking the LLM.
+
+        String first: a name that is character-for-character almost the page's own
+        (a typo, a plural, different casing) is the cheapest, safest hit there is.
+        """
+        if strings and strings[0].score >= settings.string_autoaccept_threshold:
+            return strings[0]
+        if emb and emb[0].score <= settings.embedding_autoaccept_threshold:
+            return emb[0]
+        return None
+
+    def _merge_candidates(
+        emb: list[PageCandidate], strings: list[PageCandidate]
+    ) -> list[PageCandidate]:
+        """Union both signals, one entry per page, capped for the LLM."""
+        seen: dict[int, PageCandidate] = {}
+        for candidate in (*strings, *emb):
+            seen.setdefault(candidate.page_id, candidate)
+        return list(seen.values())[: settings.resolve_candidate_limit]
+
     async def resolve_entity(state: ItemState) -> ItemState:
-        """Find the page this item belongs to: exact alias first, then vectors."""
+        """Find the page this item belongs to.
+
+        A funnel: an exact alias hit, then a cheap strong-signal auto-accept, and
+        only for genuinely ambiguous items are candidates from both the vector
+        index and string matching handed to an LLM to judge.
+        """
         item = state["item"]
         namespace = state["namespace"]
 
+        # (1) Exact alias — deterministic, no model needed.
         match = repo.find_page_by_alias(deps.conn, namespace, item.name)
-        if match is None:
-            vector = embedding.embed(
-                embedding.identity_text(item.name), model_name=settings.embedding_model
-            )
-            match = repo.find_page_by_embedding(
-                deps.conn, namespace, vector, settings.similarity_threshold
-            )
+        if match is not None:
+            log.info("%r resolves to page #%s (alias)", item.name, match.page_id)
+            return {
+                "is_new_page": False,
+                "page_id": match.page_id,
+                "page_name": match.page_name,
+                "matched_how": "alias",
+            }
 
-        if match is None:
+        # Gather candidates from both signals (recall-oriented thresholds).
+        vector = embedding.embed(
+            embedding.identity_text(item.name), model_name=settings.embedding_model
+        )
+        emb_candidates = repo.find_page_candidates_by_embedding(
+            deps.conn,
+            namespace,
+            vector,
+            settings.embedding_candidate_threshold,
+            settings.resolve_candidate_limit,
+        )
+        string_candidates = repo.find_page_candidates_by_string(
+            deps.conn,
+            namespace,
+            item.name,
+            settings.string_candidate_threshold,
+            settings.resolve_candidate_limit,
+        )
+
+        # (2) Strong signal — accept without the LLM.
+        strong = _strong_signal(emb_candidates, string_candidates)
+        if strong is not None:
+            log.info("%r resolves to page #%s (%s, auto)", item.name, strong.page_id, strong.how)
+            return {
+                "is_new_page": False,
+                "page_id": strong.page_id,
+                "page_name": strong.page_name,
+                "matched_how": strong.how,
+            }
+
+        candidates = _merge_candidates(emb_candidates, string_candidates)
+
+        # (4) No candidate at all — nothing to resolve against.
+        if not candidates:
             log.info("new page for %r", item.name)
             return {"is_new_page": True, "page_name": item.name}
 
-        log.info("%r resolves to existing page #%s (%s)", item.name, match.page_id, match.how)
+        # (3) Ambiguous — let the LLM judge against name, aliases and description.
+        decision = await deps.client.run_json(
+            prompts.resolve_entity(item, candidates), ResolveDecision, label="resolve"
+        )
+        chosen = next(
+            (c for c in candidates if c.page_id == decision.matched_page_id), None
+        )
+        if chosen is None:
+            if decision.matched_page_id is not None:
+                log.warning(
+                    "resolve returned page_id %s, not among candidates for %r; new page",
+                    decision.matched_page_id,
+                    item.name,
+                )
+            log.info("new page for %r (LLM: %s)", item.name, decision.reason)
+            return {"is_new_page": True, "page_name": item.name}
+
+        log.info(
+            "%r resolves to page #%s (LLM, %s: %s)",
+            item.name,
+            chosen.page_id,
+            decision.confidence,
+            decision.reason,
+        )
         return {
             "is_new_page": False,
-            "page_id": match.page_id,
-            "page_name": match.page_name,
-            "matched_how": match.how,
+            "page_id": chosen.page_id,
+            "page_name": chosen.page_name,
+            "matched_how": "llm_sim",
+            # An uncertain match still merges, but a human is asked to confirm it.
+            "needs_review": decision.confidence == "low",
         }
 
-    def _record_aliases(item: ExtractedItem, namespace: str, page_id: int, canonical: bool) -> None:
-        if canonical:
-            repo.upsert_alias(
-                deps.conn, namespace=namespace, name=item.name, page_id=page_id, type_="canonical"
-            )
-        else:
-            # The name we searched under resolved to this page by similarity;
-            # recording it makes the next lookup an exact hit.
-            repo.upsert_alias(
-                deps.conn, namespace=namespace, name=item.name, page_id=page_id, type_="embedding_sim"
-            )
+    def _record_aliases(
+        item: ExtractedItem, namespace: str, page_id: int, *, canonical: bool, how: str = "alias"
+    ) -> None:
+        # The name we searched under resolved to this page; recording it under the
+        # method that matched makes the next lookup an exact alias hit.
+        name_type = "canonical" if canonical else how
+        repo.upsert_alias(
+            deps.conn, namespace=namespace, name=item.name, page_id=page_id, type_=name_type
+        )
         for alias in item.aliases:
             repo.upsert_alias(
-                deps.conn, namespace=namespace, name=alias, page_id=page_id, type_="embedding_sim"
+                deps.conn, namespace=namespace, name=alias, page_id=page_id, type_="alias"
             )
 
     async def create_page(state: ItemState) -> ItemState:
@@ -103,7 +190,9 @@ def build_item_graph(deps: Deps):
         page_id = state["page_id"]
 
         with transaction(deps.conn):
-            _record_aliases(item, namespace, page_id, canonical=False)
+            _record_aliases(
+                item, namespace, page_id, canonical=False, how=state.get("matched_how", "alias")
+            )
             reference_number = repo.link_source(
                 deps.conn, wiki_id=page_id, source_id=state["source_id"], namespace=namespace
             )

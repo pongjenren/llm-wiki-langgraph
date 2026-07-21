@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Sequence
 
 import sqlite_vec
+from rapidfuzz import fuzz
 
 from llm_wiki.db.connection import EMBEDDING_TABLE
 
@@ -75,8 +76,20 @@ def get_source(conn: sqlite3.Connection, source_id: int) -> sqlite3.Row | None:
 class PageMatch:
     page_id: int
     page_name: str
-    how: str  # 'alias' | 'embedding_sim'
-    distance: float | None = None
+    how: str  # 'alias'
+
+
+@dataclass(frozen=True)
+class PageCandidate:
+    """A possible resolution target, from either the vector index or string matching."""
+
+    page_id: int
+    page_name: str
+    type: str
+    how: str  # 'embedding_sim' | 'string_sim'
+    # Signal strength in this candidate's own units: cosine *distance* for
+    # embeddings (smaller is closer), token_sort_ratio 0-100 for strings.
+    score: float
 
 
 def find_page_by_alias(conn: sqlite3.Connection, namespace: str, name: str) -> PageMatch | None:
@@ -94,16 +107,17 @@ def find_page_by_alias(conn: sqlite3.Connection, namespace: str, name: str) -> P
     return PageMatch(page_id=row["page_id"], page_name=row["page_name"], how="alias")
 
 
-def find_page_by_embedding(
+def find_page_candidates_by_embedding(
     conn: sqlite3.Connection,
     namespace: str,
     embedding: Sequence[float],
     threshold: float,
-) -> PageMatch | None:
-    """Nearest page within `threshold` cosine distance, or None."""
+    limit: int,
+) -> list[PageCandidate]:
+    """Up to `limit` nearest pages within `threshold` cosine distance, closest first."""
     rows = conn.execute(
         f"""
-        SELECT e.page_id, e.distance, p.page_name
+        SELECT e.page_id, e.distance, p.page_name, p.type
         FROM {EMBEDDING_TABLE} e
         JOIN wiki_pages p ON p.page_id = e.page_id
         WHERE e.embedding MATCH ? AND e.k = ? AND p.namespace = ?
@@ -111,17 +125,62 @@ def find_page_by_embedding(
         """,
         (sqlite_vec.serialize_float32(embedding), _KNN_OVERFETCH, namespace),
     ).fetchall()
-    if not rows:
-        return None
-    best = rows[0]
-    if best["distance"] > threshold:
-        return None
-    return PageMatch(
-        page_id=best["page_id"],
-        page_name=best["page_name"],
-        how="embedding_sim",
-        distance=float(best["distance"]),
-    )
+    candidates: list[PageCandidate] = []
+    for row in rows:
+        if row["distance"] > threshold:
+            break  # rows are ordered by distance, so nothing further qualifies
+        candidates.append(
+            PageCandidate(
+                page_id=row["page_id"],
+                page_name=row["page_name"],
+                type=row["type"],
+                how="embedding_sim",
+                score=float(row["distance"]),
+            )
+        )
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def find_page_candidates_by_string(
+    conn: sqlite3.Connection,
+    namespace: str,
+    name: str,
+    threshold: float,
+    limit: int,
+) -> list[PageCandidate]:
+    """Up to `limit` pages whose alias best-matches `name` at/above `threshold`.
+
+    Every alias in the namespace is scored with rapidfuzz token_sort_ratio; a page
+    is kept once, under its best-scoring alias. Highest score first.
+    """
+    rows = conn.execute(
+        """
+        SELECT a.query_name, a.page_id, p.page_name, p.type
+        FROM page_aliases a
+        JOIN wiki_pages p ON p.page_id = a.page_id
+        WHERE a.namespace = ?
+        """,
+        (namespace,),
+    ).fetchall()
+    query = normalize_name(name)
+    best: dict[int, PageCandidate] = {}
+    for row in rows:
+        score = fuzz.token_sort_ratio(query, row["query_name"])
+        if score < threshold:
+            continue
+        current = best.get(row["page_id"])
+        if current is None or score > current.score:
+            best[row["page_id"]] = PageCandidate(
+                page_id=row["page_id"],
+                page_name=row["page_name"],
+                type=row["type"],
+                how="string_sim",
+                score=score,
+            )
+    ranked = sorted(best.values(), key=lambda c: c.score, reverse=True)
+    return ranked[:limit]
 
 
 def insert_page(conn: sqlite3.Connection, *, page_name: str, namespace: str, type_: str) -> int:

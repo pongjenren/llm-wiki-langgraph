@@ -2,11 +2,28 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
-from llm_wiki.llm.schemas import ExtractedItem, ExtractionResult, Review
+from llm_wiki.llm.schemas import ExtractedItem, ExtractionResult, ResolveDecision, Review
 from llm_wiki.pipeline import ingest_document
 from tests.conftest import ScriptedClient
+
+
+def _always_ask_llm(deps):
+    """Neutralise both auto-accept tiers so resolution always reaches the LLM judge.
+
+    Auto-accept depends on exact embedding distances, which vary by model; forcing
+    the judge path keeps these tests about the judge, not the embedding backend.
+    """
+    deps.settings = dataclasses.replace(
+        deps.settings,
+        string_candidate_threshold=0.0,  # every existing page is a candidate
+        string_autoaccept_threshold=101.0,  # unreachable: never string auto-accept
+        embedding_autoaccept_threshold=-1.0,  # unreachable: never embedding auto-accept
+    )
+    return deps
 
 pytestmark = pytest.mark.asyncio
 
@@ -201,7 +218,7 @@ async def test_name_variants_resolve_to_one_page(make_deps, doc, conn):
     alias = conn.execute(
         "SELECT type FROM page_aliases WHERE query_name = 'self-attention networks'"
     ).fetchone()
-    assert alias["type"] == "embedding_sim"
+    assert alias["type"] == "string_sim"
 
 
 class DistinctEntitiesClient(ScriptedClient):
@@ -220,6 +237,71 @@ async def test_distinct_entities_get_separate_pages(make_deps, doc, conn):
 
     assert outcome.items[0].is_new_page
     assert conn.execute("SELECT COUNT(*) AS n FROM wiki_pages").fetchone()["n"] == 2
+
+
+class TwoConceptsClient(ScriptedClient):
+    """Two differently-named concepts, one per document."""
+
+    def __init__(self, decision: ResolveDecision) -> None:
+        super().__init__()
+        self._decision = decision
+
+    def extract_items(self, document_index: int) -> list[ExtractedItem]:
+        name = "Gradient descent" if document_index == 1 else "Backpropagation"
+        return [ExtractedItem(name=name, type="concept", description="Described.")]
+
+    def resolve(self) -> ResolveDecision:
+        return self._decision
+
+    def create_page(self) -> str:
+        return "# Page\n\nA claim [1].\n"
+
+    def merge_page(self, attempt: int) -> str:
+        return "# Page\n\nA claim [1]. Another claim [2].\n"
+
+
+async def test_llm_judge_keeps_distinct_items_apart(make_deps, doc, conn):
+    a = doc("a.md", "Gradient descent minimises a loss.\n")
+    b = doc("b.md", "Backpropagation computes gradients.\n")
+    deps = _always_ask_llm(make_deps(TwoConceptsClient(ResolveDecision(matched_page_id=None, reason="different"))))
+
+    await ingest_document(deps, "ml", a)
+    outcome = await ingest_document(deps, "ml", b)
+
+    assert deps.client.count("resolve") == 1, "the second item must consult the judge"
+    assert outcome.items[0].is_new_page
+    assert conn.execute("SELECT COUNT(*) AS n FROM wiki_pages").fetchone()["n"] == 2
+
+
+async def test_llm_judge_merges_when_it_returns_a_page_id(make_deps, doc, conn):
+    a = doc("a.md", "Gradient descent minimises a loss.\n")
+    b = doc("b.md", "Backpropagation computes gradients.\n")
+    deps = _always_ask_llm(make_deps(TwoConceptsClient(ResolveDecision(matched_page_id=1, reason="same"))))
+
+    await ingest_document(deps, "ml", a)
+    outcome = await ingest_document(deps, "ml", b)
+
+    assert not outcome.items[0].is_new_page
+    assert outcome.items[0].reference_number == 2
+    assert conn.execute("SELECT COUNT(*) AS n FROM wiki_pages").fetchone()["n"] == 1
+    alias = conn.execute(
+        "SELECT type FROM page_aliases WHERE query_name = 'backpropagation'"
+    ).fetchone()
+    assert alias["type"] == "llm_sim"
+
+
+async def test_llm_low_confidence_match_flags_review(make_deps, doc, conn):
+    a = doc("a.md", "Gradient descent minimises a loss.\n")
+    b = doc("b.md", "Backpropagation computes gradients.\n")
+    decision = ResolveDecision(matched_page_id=1, confidence="low", reason="maybe")
+    deps = _always_ask_llm(make_deps(TwoConceptsClient(decision)))
+
+    await ingest_document(deps, "ml", a)
+    outcome = await ingest_document(deps, "ml", b)
+
+    assert not outcome.items[0].is_new_page
+    assert outcome.items[0].needs_review, "an uncertain merge must ask for a human check"
+    assert conn.execute("SELECT needs_review FROM wiki_pages").fetchone()["needs_review"] == 1
 
 
 class TwoItemsSamePageClient(ScriptedClient):
