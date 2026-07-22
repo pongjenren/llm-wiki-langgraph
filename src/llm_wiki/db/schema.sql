@@ -97,10 +97,11 @@ CREATE INDEX IF NOT EXISTS idx_wiki_source_wiki ON wiki_source (wiki_id);
 -- most once (its first mention) -- and re-linking a page replaces all of its
 -- rows. Both endpoints are in the same namespace.
 CREATE TABLE IF NOT EXISTS wiki_links (
-    src_page_id BIGINT NOT NULL REFERENCES wiki_pages (page_id) ON DELETE CASCADE,
-    dst_page_id BIGINT NOT NULL REFERENCES wiki_pages (page_id) ON DELETE CASCADE,
-    namespace   TEXT   NOT NULL,
-    anchor_text TEXT   NOT NULL,   -- the surface text that got linked
+    src_page_id      BIGINT NOT NULL REFERENCES wiki_pages (page_id) ON DELETE CASCADE,
+    dst_page_id      BIGINT NOT NULL REFERENCES wiki_pages (page_id) ON DELETE CASCADE,
+    namespace        TEXT   NOT NULL,
+    anchor_text      TEXT   NOT NULL,   -- the surface text that got linked
+    context_sentence TEXT,             -- the whole sentence the mention sits in
     PRIMARY KEY (src_page_id, dst_page_id)
 );
 

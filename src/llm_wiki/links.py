@@ -51,6 +51,19 @@ _HEADING = re.compile(r"(?m)^#{1,6}[ \t].*$")
 # pass is idempotent.
 _LOCAL_PAGE_LINK = re.compile(r"\[([^\]]+)\]\((?!\w+://)([^)/]+\.md)\)")
 
+# Sentence extraction for the stored context snippet. A sentence terminator only
+# counts when followed by whitespace/end, which alone skips the internal periods
+# of abbreviations ("e.g.", "U.S.") and decimals ("3.14"); the abbreviation set
+# then covers terminal-period cases ("Inc.", "Corp."). A paragraph (blank-line
+# delimited) bounds the search so a snippet never crosses markdown structure.
+_SENT_END = re.compile(r"[.!?]")
+_BLANK_LINE = re.compile(r"\n[ \t]*\n")
+_WHITESPACE = re.compile(r"\s+")
+_ABBREV = frozenset(
+    {"inc.", "corp.", "co.", "ltd.", "llc.", "dr.", "mr.", "mrs.", "ms.", "prof.",
+     "st.", "jr.", "sr.", "vs.", "etc.", "e.g.", "i.e.", "u.s.", "no.", "fig."}
+)
+
 
 def _is_word_char(ch: str) -> bool:
     return ch.isalnum() or ch == "_"
@@ -186,16 +199,65 @@ def _link_target(page_name: str) -> str:
     return f"{slug}.md"
 
 
-def _apply(body: str, matches: Sequence[_Match]) -> tuple[str, list[tuple[int, str]]]:
-    """Splice links into the body. Returns the new body and (page_id, anchor) links."""
+def _token_before(body: str, idx: int) -> str:
+    """The alnum/dot run ending just before ``idx`` -- an abbreviation candidate."""
+    j = idx
+    while j > 0 and (body[j - 1].isalnum() or body[j - 1] == "."):
+        j -= 1
+    return body[j:idx]
+
+
+def _is_sentence_break(body: str, term_end: int) -> bool:
+    """Whether the terminator ending at ``term_end`` really ends a sentence.
+
+    A terminator counts only when followed by whitespace or end of text, and when
+    the token it closes is not a known abbreviation.
+    """
+    if term_end < len(body) and not body[term_end].isspace():
+        return False
+    return _token_before(body, term_end).casefold() not in _ABBREV
+
+
+def _sentence_span(body: str, start: int, end: int) -> str:
+    """The sentence containing ``body[start:end + 1]``, collapsed to one line.
+
+    Bounded to the mention's paragraph so the snippet never spills across markdown
+    structure, then trimmed left/right to the enclosing sentence boundaries.
+    """
+    block_start = 0
+    for m in _BLANK_LINE.finditer(body, 0, start):
+        block_start = m.end()
+    tail = _BLANK_LINE.search(body, end + 1)
+    block_end = tail.start() if tail else len(body)
+
+    left = block_start
+    for m in _SENT_END.finditer(body, block_start, start):
+        if _is_sentence_break(body, m.end()):
+            left = m.end()
+
+    right = block_end
+    for m in _SENT_END.finditer(body, end + 1, block_end):
+        if _is_sentence_break(body, m.end()):
+            right = m.end()
+            break
+
+    return _WHITESPACE.sub(" ", body[left:right]).strip()
+
+
+def _apply(body: str, matches: Sequence[_Match]) -> tuple[str, list[tuple[int, str, str]]]:
+    """Splice links into the body.
+
+    Returns the new body and (page_id, anchor, context_sentence) links: the anchor
+    is the linked surface text, the sentence is the whole clause it sits in.
+    """
     out: list[str] = []
-    links: list[tuple[int, str]] = []
+    links: list[tuple[int, str, str]] = []
     cursor = 0
     for m in matches:
         out.append(body[cursor:m.start])
         anchor = body[m.start:m.end + 1]
         out.append(f"[{anchor}]({_link_target(m.page_name)})")
-        links.append((m.page_id, anchor))
+        links.append((m.page_id, anchor, _sentence_span(body, m.start, m.end)))
         cursor = m.end + 1
     out.append(body[cursor:])
     return "".join(out), links
@@ -203,7 +265,7 @@ def _apply(body: str, matches: Sequence[_Match]) -> tuple[str, list[tuple[int, s
 
 def relink_body(
     body: str, automaton: ahocorasick.Automaton | None, src_page_id: int
-) -> tuple[str, list[tuple[int, str]]]:
+) -> tuple[str, list[tuple[int, str, str]]]:
     """Relink a single page body. ``body`` must be free of banner and references."""
     unwrapped = unwrap_local_links(body)
     matches = find_matches(unwrapped, automaton, src_page_id)
@@ -215,7 +277,7 @@ class LinkResult:
     page_id: int
     page_name: str
     changed: bool
-    links: list[tuple[int, str]] = field(default_factory=list)
+    links: list[tuple[int, str, str]] = field(default_factory=list)
 
 
 def link_pages(

@@ -159,6 +159,41 @@ def test_matches_are_case_and_alias_insensitive(conn, settings):
     assert len(repo.list_outgoing_links(conn, src)) == 1
 
 
+def test_sentence_span_bounds_and_abbreviations():
+    # A terminal-period abbreviation ("Inc.") must not cut the sentence short.
+    body = "# H\n\nFoo Inc. makes the Widget here. Another one.\n"
+    i = body.index("Widget")
+    span = links._sentence_span(body, i, i + len("Widget") - 1)
+    assert span == "Foo Inc. makes the Widget here."
+
+
+def test_sentence_span_stays_within_paragraph():
+    # The snippet must not reach back into the previous paragraph.
+    body = "First para ends here.\n\nSecond has the Widget inside.\n"
+    i = body.index("Widget")
+    span = links._sentence_span(body, i, i + len("Widget") - 1)
+    assert span == "Second has the Widget inside."
+
+
+def test_context_sentence_is_stored(conn, settings):
+    _page(conn, settings, "Transformer", "# Transformer\n\nx\n")
+    src = _page(
+        conn,
+        settings,
+        "Encoder",
+        "# Encoder\n\nAn Encoder feeds a Transformer. A Transformer uses attention.\n",
+    )
+
+    _all(conn, settings)
+
+    row = next(
+        r for r in repo.list_outgoing_links(conn, src) if r["page_name"] == "Transformer"
+    )
+    # anchor stays the linked name; context is the whole first-mention sentence.
+    assert row["anchor_text"] == "Transformer"
+    assert row["context_sentence"] == "An Encoder feeds a Transformer."
+
+
 def test_dry_run_reports_without_writing(conn, settings):
     _page(conn, settings, "Transformer", "# Transformer\n\nx\n")
     src = _page(conn, settings, "Doc", "# Doc\n\nA Transformer appears.\n")

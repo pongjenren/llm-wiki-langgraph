@@ -323,22 +323,24 @@ def replace_page_links(
     *,
     src_page_id: int,
     namespace: str,
-    links: Sequence[tuple[int, str]],
+    links: Sequence[tuple[int, str, str]],
 ) -> None:
     """Replace all outgoing links for a page.
 
     Delete-then-insert keeps the table in sync with the freshly rewritten body:
-    a mention that disappeared drops its row rather than lingering.
+    a mention that disappeared drops its row rather than lingering. Each link is
+    (dst_page_id, anchor_text, context_sentence).
     """
     conn.execute("DELETE FROM wiki_links WHERE src_page_id = %s", (src_page_id,))
-    for dst_page_id, anchor_text in links:
+    for dst_page_id, anchor_text, context_sentence in links:
         conn.execute(
             """
-            INSERT INTO wiki_links (src_page_id, dst_page_id, namespace, anchor_text)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO wiki_links
+                (src_page_id, dst_page_id, namespace, anchor_text, context_sentence)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (src_page_id, dst_page_id) DO NOTHING
             """,
-            (src_page_id, dst_page_id, namespace, anchor_text),
+            (src_page_id, dst_page_id, namespace, anchor_text, context_sentence),
         )
 
 
@@ -346,7 +348,7 @@ def list_backlinks(conn: Connection, dst_page_id: int) -> list[Row]:
     """Pages that link to the given page."""
     return conn.execute(
         """
-        SELECT l.src_page_id, p.page_name, l.anchor_text
+        SELECT l.src_page_id, p.page_name, l.anchor_text, l.context_sentence
         FROM wiki_links l
         JOIN wiki_pages p ON p.page_id = l.src_page_id
         WHERE l.dst_page_id = %s
@@ -360,7 +362,7 @@ def list_outgoing_links(conn: Connection, src_page_id: int) -> list[Row]:
     """Pages the given page links to."""
     return conn.execute(
         """
-        SELECT l.dst_page_id, p.page_name, l.anchor_text
+        SELECT l.dst_page_id, p.page_name, l.anchor_text, l.context_sentence
         FROM wiki_links l
         JOIN wiki_pages p ON p.page_id = l.dst_page_id
         WHERE l.src_page_id = %s
