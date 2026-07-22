@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from llm_wiki import embedding
 from llm_wiki.config import Settings
-from llm_wiki.db.connection import connect, init_db
+from llm_wiki.db.connection import DROP_ALL_SQL, connect, init_db
 from llm_wiki.graph import Deps
 from llm_wiki.llm.schemas import (
     ExtractedItem,
@@ -94,18 +95,31 @@ def workspace(tmp_path: Path) -> Path:
     return tmp_path
 
 
+# Tests run against a real PostgreSQL (with pgvector). Point LLM_WIKI_TEST_DB_URL
+# at a throwaway database; the conn fixture drops and recreates every table for
+# each test, so its contents are not preserved.
+TEST_DB_URL = os.getenv(
+    "LLM_WIKI_TEST_DB_URL", "postgresql://llm_wiki:llm_wiki@localhost:5432/llm_wiki"
+)
+
+
 @pytest.fixture
 def settings(workspace: Path) -> Settings:
     return Settings(
         raw_dir=workspace / "raw",
         wiki_dir=workspace / "wiki",
-        db_path=workspace / "wiki.db",
+        db_url=TEST_DB_URL,
     )
 
 
 @pytest.fixture
 def conn(settings: Settings):
-    connection = connect(settings.db_path)
+    try:
+        connection = connect(settings.db_url)
+    except Exception as exc:  # no reachable Postgres -> nothing to test against
+        pytest.skip(f"PostgreSQL not available at {settings.db_url}: {exc}")
+    # Start each test from a clean schema so tests never see each other's rows.
+    connection.execute(DROP_ALL_SQL)
     init_db(connection, embedding.embedding_dim(model_name=settings.embedding_model))
     yield connection
     connection.close()

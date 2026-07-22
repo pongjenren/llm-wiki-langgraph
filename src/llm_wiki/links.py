@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import re
-import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -29,7 +28,7 @@ import ahocorasick
 
 from llm_wiki import pages
 from llm_wiki.db import repo
-from llm_wiki.db.connection import transaction
+from llm_wiki.db.connection import Connection, transaction
 
 log = logging.getLogger(__name__)
 
@@ -220,7 +219,7 @@ class LinkResult:
 
 
 def link_pages(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     wiki_dir: Path,
     namespace: str,

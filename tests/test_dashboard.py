@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from llm_wiki import telemetry
@@ -50,7 +49,8 @@ def test_record_run_persists_counts_and_statuses(conn, tmp_path):
     docs = repo.list_run_docs(conn, run_id)
     assert [d["status"] for d in docs] == ["ok", "skipped", "failed", "failed"]
 
-    a_items = json.loads(docs[0]["items_json"])
+    # items_json is a JSONB column, so it comes back already parsed.
+    a_items = docs[0]["items_json"]
     assert [i["action"] for i in a_items] == ["created", "merged"]
     assert a_items[1]["reference_number"] == 2
 

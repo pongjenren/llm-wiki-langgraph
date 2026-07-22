@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
 from llm_wiki.config import Settings
+from llm_wiki.db.connection import Connection
 from llm_wiki.llm.client import LLMClient
 from llm_wiki.llm.schemas import ExtractedItem
 
@@ -21,7 +21,7 @@ class Deps:
     fail.
     """
 
-    conn: sqlite3.Connection
+    conn: Connection
     client: LLMClient
     settings: Settings
 

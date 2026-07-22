@@ -7,8 +7,6 @@ than calling the full init_db.
 
 from __future__ import annotations
 
-import json
-import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -19,7 +17,7 @@ from starlette.routing import Route
 from starlette.templating import Jinja2Templates
 
 from llm_wiki.config import Settings, settings
-from llm_wiki.db.connection import SCHEMA_PATH, connect
+from llm_wiki.db.connection import SCHEMA_PATH, Connection, connect
 from llm_wiki.dashboard.status import compute_raw_status
 
 TEMPLATES_DIR = Path(__file__).with_name("templates")
@@ -37,13 +35,16 @@ def _format_duration(seconds: float | None) -> str:
     return f"{hours}h {minutes}m {secs}s"
 
 
-def _format_dt(value: str | None) -> str:
+def _format_dt(value: datetime | str | None) -> str:
     if not value:
         return "—"
-    try:
-        return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return value
+    # TIMESTAMPTZ columns come back as datetime; older callers may pass ISO text.
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+    return value.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _templates() -> Jinja2Templates:
@@ -56,9 +57,9 @@ def _templates() -> Jinja2Templates:
 def create_app(app_settings: Settings = settings) -> Starlette:
     templates = _templates()
 
-    def _connect() -> sqlite3.Connection:
-        conn = connect(app_settings.db_path)
-        conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    def _connect() -> Connection:
+        conn = connect(app_settings.db_url)
+        conn.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
         return conn
 
     async def overview(request: Request) -> Response:
@@ -94,9 +95,8 @@ def create_app(app_settings: Settings = settings) -> Starlette:
             conn.close()
         if run is None:
             return HTMLResponse(f"Run {run_id} not found.", status_code=404)
-        docs_view = [
-            {"row": doc, "entries": json.loads(doc["items_json"] or "[]")} for doc in docs
-        ]
+        # items_json is a JSONB column, so psycopg2 returns it already parsed.
+        docs_view = [{"row": doc, "entries": doc["items_json"] or []} for doc in docs]
         return templates.TemplateResponse(
             request, "run.html", {"run": run, "docs": docs_view}
         )

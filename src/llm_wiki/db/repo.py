@@ -7,22 +7,22 @@ a single transaction (see connection.transaction).
 from __future__ import annotations
 
 import re
-import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
-import sqlite_vec
+from pgvector import Vector
 from rapidfuzz import fuzz
 
-from llm_wiki.db.connection import EMBEDDING_TABLE
+from llm_wiki.db.connection import EMBEDDING_TABLE, Connection
 
 _WHITESPACE = re.compile(r"\s+")
 
-# How many neighbours to pull from the vector index before filtering by
-# namespace. Over-fetching keeps namespace filtering correct without pushing a
-# WHERE clause into the KNN scan.
+# How many neighbours to pull from the vector index before applying the
+# distance threshold and candidate limit.
 _KNN_OVERFETCH = 20
+
+Row = Mapping[str, Any]
 
 
 def normalize_name(name: str) -> str:
@@ -30,8 +30,8 @@ def normalize_name(name: str) -> str:
     return _WHITESPACE.sub(" ", name).strip().casefold()
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 # --------------------------------------------------------------------------
@@ -39,32 +39,33 @@ def _now() -> str:
 # --------------------------------------------------------------------------
 
 
-def find_source_by_sha(conn: sqlite3.Connection, namespace: str, sha256: str) -> sqlite3.Row | None:
+def find_source_by_sha(conn: Connection, namespace: str, sha256: str) -> Row | None:
     return conn.execute(
-        "SELECT * FROM source WHERE namespace = ? AND sha256 = ?", (namespace, sha256)
+        "SELECT * FROM source WHERE namespace = %s AND sha256 = %s", (namespace, sha256)
     ).fetchone()
 
 
 def insert_source(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     filename: str,
     namespace: str,
     sha256: str,
     timestamp: str | None = None,
 ) -> int:
-    cur = conn.execute(
+    row = conn.execute(
         """
         INSERT INTO source (filename, timestamp, namespace, sha256, ingest_time)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING id
         """,
         (filename, timestamp, namespace, sha256, _now()),
-    )
-    return int(cur.lastrowid)
+    ).fetchone()
+    return int(row["id"])
 
 
-def get_source(conn: sqlite3.Connection, source_id: int) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM source WHERE id = ?", (source_id,)).fetchone()
+def get_source(conn: Connection, source_id: int) -> Row | None:
+    return conn.execute("SELECT * FROM source WHERE id = %s", (source_id,)).fetchone()
 
 
 # --------------------------------------------------------------------------
@@ -92,13 +93,13 @@ class PageCandidate:
     score: float
 
 
-def find_page_by_alias(conn: sqlite3.Connection, namespace: str, name: str) -> PageMatch | None:
+def find_page_by_alias(conn: Connection, namespace: str, name: str) -> PageMatch | None:
     row = conn.execute(
         """
         SELECT p.page_id, p.page_name
         FROM page_aliases a
         JOIN wiki_pages p ON p.page_id = a.page_id
-        WHERE a.namespace = ? AND a.query_name = ?
+        WHERE a.namespace = %s AND a.query_name = %s
         """,
         (namespace, normalize_name(name)),
     ).fetchone()
@@ -108,22 +109,27 @@ def find_page_by_alias(conn: sqlite3.Connection, namespace: str, name: str) -> P
 
 
 def find_page_candidates_by_embedding(
-    conn: sqlite3.Connection,
+    conn: Connection,
     namespace: str,
     embedding: Sequence[float],
     threshold: float,
     limit: int,
 ) -> list[PageCandidate]:
-    """Up to `limit` nearest pages within `threshold` cosine distance, closest first."""
+    """Up to `limit` nearest pages within `threshold` cosine distance, closest first.
+
+    The `<=>` operator is pgvector's cosine distance (smaller is closer), so it
+    matches the sqlite-vec semantics the thresholds were tuned against.
+    """
     rows = conn.execute(
         f"""
-        SELECT e.page_id, e.distance, p.page_name, p.type
+        SELECT e.page_id, (e.embedding <=> %s) AS distance, p.page_name, p.type
         FROM {EMBEDDING_TABLE} e
         JOIN wiki_pages p ON p.page_id = e.page_id
-        WHERE e.embedding MATCH ? AND e.k = ? AND p.namespace = ?
-        ORDER BY e.distance
+        WHERE p.namespace = %s
+        ORDER BY distance
+        LIMIT %s
         """,
-        (sqlite_vec.serialize_float32(embedding), _KNN_OVERFETCH, namespace),
+        (Vector(embedding), namespace, _KNN_OVERFETCH),
     ).fetchall()
     candidates: list[PageCandidate] = []
     for row in rows:
@@ -144,7 +150,7 @@ def find_page_candidates_by_embedding(
 
 
 def find_page_candidates_by_string(
-    conn: sqlite3.Connection,
+    conn: Connection,
     namespace: str,
     name: str,
     threshold: float,
@@ -160,7 +166,7 @@ def find_page_candidates_by_string(
         SELECT a.query_name, a.page_id, p.page_name, p.type
         FROM page_aliases a
         JOIN wiki_pages p ON p.page_id = a.page_id
-        WHERE a.namespace = ?
+        WHERE a.namespace = %s
         """,
         (namespace,),
     ).fetchall()
@@ -183,57 +189,62 @@ def find_page_candidates_by_string(
     return ranked[:limit]
 
 
-def insert_page(conn: sqlite3.Connection, *, page_name: str, namespace: str, type_: str) -> int:
-    cur = conn.execute(
+def insert_page(conn: Connection, *, page_name: str, namespace: str, type_: str) -> int:
+    row = conn.execute(
         """
         INSERT INTO wiki_pages (page_name, namespace, type, create_time)
-        VALUES (?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s)
+        RETURNING page_id
         """,
         (page_name, namespace, type_, _now()),
-    )
-    return int(cur.lastrowid)
+    ).fetchone()
+    return int(row["page_id"])
 
 
-def get_page(conn: sqlite3.Connection, page_id: int) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM wiki_pages WHERE page_id = ?", (page_id,)).fetchone()
+def get_page(conn: Connection, page_id: int) -> Row | None:
+    return conn.execute("SELECT * FROM wiki_pages WHERE page_id = %s", (page_id,)).fetchone()
 
 
-def set_needs_review(conn: sqlite3.Connection, page_id: int, flag: bool) -> None:
+def set_needs_review(conn: Connection, page_id: int, flag: bool) -> None:
     conn.execute(
-        "UPDATE wiki_pages SET needs_review = ? WHERE page_id = ?", (1 if flag else 0, page_id)
+        "UPDATE wiki_pages SET needs_review = %s WHERE page_id = %s", (flag, page_id)
     )
 
 
-def list_pages(conn: sqlite3.Connection, namespace: str) -> list[sqlite3.Row]:
+def list_pages(conn: Connection, namespace: str) -> list[Row]:
     return conn.execute(
         """
         SELECT page_id, page_name, type, needs_review, create_time
-        FROM wiki_pages WHERE namespace = ? ORDER BY page_name COLLATE NOCASE
+        FROM wiki_pages WHERE namespace = %s ORDER BY lower(page_name)
         """,
         (namespace,),
     ).fetchall()
 
 
 def upsert_alias(
-    conn: sqlite3.Connection, *, namespace: str, name: str, page_id: int, type_: str
+    conn: Connection, *, namespace: str, name: str, page_id: int, type_: str
 ) -> None:
     """Record an alias. An existing alias is left alone: a name already bound to
     a page (canonical, or confirmed manually) must not be silently re-pointed by
     a later fuzzy match."""
     conn.execute(
         """
-        INSERT OR IGNORE INTO page_aliases (namespace, query_name, page_id, type)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO page_aliases (namespace, query_name, page_id, type)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (namespace, query_name) DO NOTHING
         """,
         (namespace, normalize_name(name), page_id, type_),
     )
 
 
-def upsert_embedding(conn: sqlite3.Connection, page_id: int, embedding: Sequence[float]) -> None:
-    conn.execute(f"DELETE FROM {EMBEDDING_TABLE} WHERE page_id = ?", (page_id,))
+def upsert_embedding(conn: Connection, page_id: int, embedding: Sequence[float]) -> None:
     conn.execute(
-        f"INSERT INTO {EMBEDDING_TABLE} (page_id, embedding) VALUES (?, ?)",
-        (page_id, sqlite_vec.serialize_float32(embedding)),
+        f"""
+        INSERT INTO {EMBEDDING_TABLE} (page_id, embedding)
+        VALUES (%s, %s)
+        ON CONFLICT (page_id) DO UPDATE SET embedding = EXCLUDED.embedding
+        """,
+        (page_id, Vector(embedding)),
     )
 
 
@@ -242,21 +253,21 @@ def upsert_embedding(conn: sqlite3.Connection, page_id: int, embedding: Sequence
 # --------------------------------------------------------------------------
 
 
-def link_source(conn: sqlite3.Connection, *, wiki_id: int, source_id: int, namespace: str) -> int:
+def link_source(conn: Connection, *, wiki_id: int, source_id: int, namespace: str) -> int:
     """Link a source to a page and return its reference number.
 
     Idempotent: if the source already cites this page, its existing reference
     number is returned rather than allocating a new one.
     """
     existing = conn.execute(
-        "SELECT reference_order FROM wiki_source WHERE wiki_id = ? AND source_id = ?",
+        "SELECT reference_order FROM wiki_source WHERE wiki_id = %s AND source_id = %s",
         (wiki_id, source_id),
     ).fetchone()
     if existing is not None:
         return int(existing["reference_order"])
 
     row = conn.execute(
-        "SELECT COALESCE(MAX(reference_order), 0) AS n FROM wiki_source WHERE wiki_id = ?",
+        "SELECT COALESCE(MAX(reference_order), 0) AS n FROM wiki_source WHERE wiki_id = %s",
         (wiki_id,),
     ).fetchone()
     reference_order = int(row["n"]) + 1
@@ -264,20 +275,20 @@ def link_source(conn: sqlite3.Connection, *, wiki_id: int, source_id: int, names
     conn.execute(
         """
         INSERT INTO wiki_source (wiki_id, source_id, reference_order, namespace)
-        VALUES (?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s)
         """,
         (wiki_id, source_id, reference_order, namespace),
     )
     return reference_order
 
 
-def list_references(conn: sqlite3.Connection, wiki_id: int) -> list[sqlite3.Row]:
+def list_references(conn: Connection, wiki_id: int) -> list[Row]:
     return conn.execute(
         """
         SELECT ws.reference_order, s.filename, s.namespace, s.ingest_time
         FROM wiki_source ws
         JOIN source s ON s.id = ws.source_id
-        WHERE ws.wiki_id = ?
+        WHERE ws.wiki_id = %s
         ORDER BY ws.reference_order
         """,
         (wiki_id,),
@@ -289,7 +300,7 @@ def list_references(conn: sqlite3.Connection, wiki_id: int) -> list[sqlite3.Row]
 # --------------------------------------------------------------------------
 
 
-def load_link_dictionary(conn: sqlite3.Connection, namespace: str) -> list[sqlite3.Row]:
+def load_link_dictionary(conn: Connection, namespace: str) -> list[Row]:
     """Every alias in a namespace with the page it resolves to.
 
     This is the dictionary the linker scans page bodies against. query_name is
@@ -301,14 +312,14 @@ def load_link_dictionary(conn: sqlite3.Connection, namespace: str) -> list[sqlit
         SELECT a.query_name, a.page_id, p.page_name
         FROM page_aliases a
         JOIN wiki_pages p ON p.page_id = a.page_id
-        WHERE a.namespace = ?
+        WHERE a.namespace = %s
         """,
         (namespace,),
     ).fetchall()
 
 
 def replace_page_links(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     src_page_id: int,
     namespace: str,
@@ -319,40 +330,41 @@ def replace_page_links(
     Delete-then-insert keeps the table in sync with the freshly rewritten body:
     a mention that disappeared drops its row rather than lingering.
     """
-    conn.execute("DELETE FROM wiki_links WHERE src_page_id = ?", (src_page_id,))
+    conn.execute("DELETE FROM wiki_links WHERE src_page_id = %s", (src_page_id,))
     for dst_page_id, anchor_text in links:
         conn.execute(
             """
-            INSERT OR IGNORE INTO wiki_links (src_page_id, dst_page_id, namespace, anchor_text)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO wiki_links (src_page_id, dst_page_id, namespace, anchor_text)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (src_page_id, dst_page_id) DO NOTHING
             """,
             (src_page_id, dst_page_id, namespace, anchor_text),
         )
 
 
-def list_backlinks(conn: sqlite3.Connection, dst_page_id: int) -> list[sqlite3.Row]:
+def list_backlinks(conn: Connection, dst_page_id: int) -> list[Row]:
     """Pages that link to the given page."""
     return conn.execute(
         """
         SELECT l.src_page_id, p.page_name, l.anchor_text
         FROM wiki_links l
         JOIN wiki_pages p ON p.page_id = l.src_page_id
-        WHERE l.dst_page_id = ?
-        ORDER BY p.page_name COLLATE NOCASE
+        WHERE l.dst_page_id = %s
+        ORDER BY lower(p.page_name)
         """,
         (dst_page_id,),
     ).fetchall()
 
 
-def list_outgoing_links(conn: sqlite3.Connection, src_page_id: int) -> list[sqlite3.Row]:
+def list_outgoing_links(conn: Connection, src_page_id: int) -> list[Row]:
     """Pages the given page links to."""
     return conn.execute(
         """
         SELECT l.dst_page_id, p.page_name, l.anchor_text
         FROM wiki_links l
         JOIN wiki_pages p ON p.page_id = l.dst_page_id
-        WHERE l.src_page_id = ?
-        ORDER BY p.page_name COLLATE NOCASE
+        WHERE l.src_page_id = %s
+        ORDER BY lower(p.page_name)
         """,
         (src_page_id,),
     ).fetchall()
@@ -363,15 +375,16 @@ def list_outgoing_links(conn: sqlite3.Connection, src_page_id: int) -> list[sqli
 # --------------------------------------------------------------------------
 
 
-def start_run(conn: sqlite3.Connection, *, started_at: str | None = None) -> int:
-    cur = conn.execute(
-        "INSERT INTO ingest_run (started_at) VALUES (?)", (started_at or _now(),)
-    )
-    return int(cur.lastrowid)
+def start_run(conn: Connection, *, started_at: datetime | None = None) -> int:
+    row = conn.execute(
+        "INSERT INTO ingest_run (started_at) VALUES (%s) RETURNING run_id",
+        (started_at or _now(),),
+    ).fetchone()
+    return int(row["run_id"])
 
 
 def finish_run(
-    conn: sqlite3.Connection,
+    conn: Connection,
     run_id: int,
     *,
     total_seconds: float,
@@ -381,14 +394,14 @@ def finish_run(
     skipped: int,
     flagged: int,
     failed: int,
-    finished_at: str | None = None,
+    finished_at: datetime | None = None,
 ) -> None:
     conn.execute(
         """
         UPDATE ingest_run
-        SET finished_at = ?, total_seconds = ?, doc_count = ?, created = ?,
-            merged = ?, skipped = ?, flagged = ?, failed = ?
-        WHERE run_id = ?
+        SET finished_at = %s, total_seconds = %s, doc_count = %s, created = %s,
+            merged = %s, skipped = %s, flagged = %s, failed = %s
+        WHERE run_id = %s
         """,
         (
             finished_at or _now(),
@@ -405,7 +418,7 @@ def finish_run(
 
 
 def insert_ingest_doc(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     run_id: int,
     namespace: str,
@@ -417,40 +430,41 @@ def insert_ingest_doc(
     error: str | None = None,
     items_json: str = "[]",
 ) -> int:
-    cur = conn.execute(
+    row = conn.execute(
         """
         INSERT INTO ingest_doc
             (run_id, namespace, filename, path, status, seconds, skip_reason, error, items_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
         """,
         (run_id, namespace, filename, path, status, seconds, skip_reason, error, items_json),
-    )
-    return int(cur.lastrowid)
+    ).fetchone()
+    return int(row["id"])
 
 
-def list_runs(conn: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]:
+def list_runs(conn: Connection, limit: int = 50) -> list[Row]:
     return conn.execute(
-        "SELECT * FROM ingest_run ORDER BY run_id DESC LIMIT ?", (limit,)
+        "SELECT * FROM ingest_run ORDER BY run_id DESC LIMIT %s", (limit,)
     ).fetchall()
 
 
-def get_run(conn: sqlite3.Connection, run_id: int) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM ingest_run WHERE run_id = ?", (run_id,)).fetchone()
+def get_run(conn: Connection, run_id: int) -> Row | None:
+    return conn.execute("SELECT * FROM ingest_run WHERE run_id = %s", (run_id,)).fetchone()
 
 
-def latest_run(conn: sqlite3.Connection) -> sqlite3.Row | None:
+def latest_run(conn: Connection) -> Row | None:
     return conn.execute(
         "SELECT * FROM ingest_run ORDER BY run_id DESC LIMIT 1"
     ).fetchone()
 
 
-def list_run_docs(conn: sqlite3.Connection, run_id: int) -> list[sqlite3.Row]:
+def list_run_docs(conn: Connection, run_id: int) -> list[Row]:
     return conn.execute(
-        "SELECT * FROM ingest_doc WHERE run_id = ? ORDER BY id", (run_id,)
+        "SELECT * FROM ingest_doc WHERE run_id = %s ORDER BY id", (run_id,)
     ).fetchall()
 
 
-def latest_ingest_docs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def latest_ingest_docs(conn: Connection) -> list[Row]:
     """Most recent ingest_doc per (namespace, path), oldest id first.
 
     Used to annotate raw files with their last-known outcome. Later runs win: a
@@ -471,7 +485,7 @@ def latest_ingest_docs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def source_filenames_by_namespace(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+def source_filenames_by_namespace(conn: Connection) -> set[tuple[str, str]]:
     """(namespace, filename) pairs that already have a `source` row.
 
     Lets the dashboard mark files ingested before telemetry existed (which have

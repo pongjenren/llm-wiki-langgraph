@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
 from llm_wiki import loaders
 from llm_wiki.db import repo
+from llm_wiki.db.connection import Connection
 
 # Dashboard-facing status of a raw file, in the order we want columns/badges to
 # read. "pending" means present on disk but never seen by an ingest run.
@@ -39,7 +39,7 @@ class StatusSummary:
         return len(self.files)
 
 
-def compute_raw_status(conn: sqlite3.Connection, raw_dir: Path) -> StatusSummary:
+def compute_raw_status(conn: Connection, raw_dir: Path) -> StatusSummary:
     """Every supported file under raw/, annotated with its last-known outcome."""
     docs = repo.latest_ingest_docs(conn)
     # Paths are canonicalized on write, so the resolved path is the precise key.

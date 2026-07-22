@@ -116,7 +116,7 @@ uv run llm-wiki status                      # what is in the knowledge base
 ```
 
 Pages are written to `wiki/<namespace>/<Page_Name>.md`, with a generated
-`index.md` per namespace. The markdown files are the source of truth; SQLite
+`index.md` per namespace. The markdown files are the source of truth; PostgreSQL
 holds metadata only.
 
 Ingest cross-links the pages it touches automatically. Run a full reconcile when
@@ -135,9 +135,9 @@ uv run llm-wiki dashboard                    # http://127.0.0.1:8000
 uv run llm-wiki dashboard --port 9000        # bind a different port
 ```
 
-To start over, `reset` empties `wiki/` and deletes the database (including its
-WAL sidecars). `raw/` is never touched, so a following `ingest` rebuilds
-everything from the same sources:
+To start over, `reset` empties `wiki/` and drops every llm-wiki table from the
+database. `raw/` is never touched, so a following `ingest` rebuilds everything
+from the same sources:
 
 ```bash
 uv run llm-wiki reset                        # prompts before deleting
@@ -146,8 +146,10 @@ uv run llm-wiki reset --yes                  # skip the confirmation
 
 ## Schema
 
-SQLite with [sqlite-vec](https://github.com/asg017/sqlite-vec) for similarity
-search (`db/schema.sql`).
+PostgreSQL with [pgvector](https://github.com/pgvector/pgvector) for similarity
+search (`db/schema.sql`). The database server is expected to run separately;
+point `LLM_WIKI_DB_URL` at it (default
+`postgresql://llm_wiki:llm_wiki@localhost:5432/llm_wiki`).
 
 | Table | Holds |
 |---|---|
@@ -156,7 +158,7 @@ search (`db/schema.sql`).
 | `page_aliases` | names → page, PK `(namespace, query_name)`, typed `canonical` / `embedding_sim` / `manual` |
 | `wiki_source` | which sources cite a page and in what order, `UNIQUE(wiki_id, source_id)` |
 | `wiki_links` | directed page → page links, PK `(src_page_id, dst_page_id)`, indexed by target for backlinks |
-| `wiki_page_embeddings` | `vec0` virtual table; created at runtime because its dimension follows the embedding model |
+| `wiki_page_embeddings` | pgvector `vector(N)` table with an HNSW cosine index; created at runtime because its dimension follows the embedding model |
 | `ingest_run` / `ingest_doc` | per-run and per-document ingest telemetry, powering the dashboard |
 
 ## Development

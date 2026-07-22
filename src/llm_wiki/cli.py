@@ -155,7 +155,7 @@ def ingest(
     typer.echo(f"Ingesting {len(targets)} document(s) into {settings.wiki_dir}\n")
 
     async def run() -> int:
-        conn = connect(settings.db_path)
+        conn = connect(settings.db_url)
         try:
             init_db(conn, embedding.embedding_dim(model_name=settings.embedding_model))
             start = time.monotonic()
@@ -195,11 +195,12 @@ def graph() -> None:
 @app.command()
 def status() -> None:
     """Show what is currently in the knowledge base."""
-    conn = connect(settings.db_path)
+    conn = connect(settings.db_url)
     try:
         init_db(conn, embedding.embedding_dim(model_name=settings.embedding_model))
         namespaces = conn.execute(
-            "SELECT namespace, COUNT(*) AS pages, SUM(needs_review) AS flagged "
+            "SELECT namespace, COUNT(*) AS pages, "
+            "COUNT(*) FILTER (WHERE needs_review) AS flagged "
             "FROM wiki_pages GROUP BY namespace ORDER BY namespace"
         ).fetchall()
         sources = conn.execute("SELECT COUNT(*) AS n FROM source").fetchone()["n"]
@@ -220,13 +221,14 @@ def status() -> None:
 def reset(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
-    """Wipe the wiki pages and the database, back to a clean slate.
+    """Wipe the wiki pages and drop every database table, back to a clean slate.
 
     Raw source documents are never touched — re-running `ingest` rebuilds
     everything from them.
     """
+    from llm_wiki.db.connection import DROP_ALL_SQL
+
     wiki_dir = settings.wiki_dir
-    db_path = settings.db_path
 
     # Guard against a misconfigured LLM_WIKI_WIKI_DIR turning this into an
     # rm -rf of the project (or of the raw corpus we promise not to touch).
@@ -236,16 +238,9 @@ def reset(
             raise typer.Exit(code=1)
 
     pages = sorted(p for p in wiki_dir.rglob("*") if p.is_file()) if wiki_dir.exists() else []
-    # SQLite in WAL mode keeps state in sidecar files; leaving them behind
-    # would resurrect part of the old database.
-    db_files = [p for p in (db_path, *(db_path.with_name(db_path.name + s) for s in ("-wal", "-shm"))) if p.exists()]
-
-    if not pages and not db_files:
-        typer.echo("Already clean — nothing to remove.")
-        return
 
     typer.echo(f"This will delete {len(pages)} page(s) under {wiki_dir}")
-    typer.echo(f"and {len(db_files)} database file(s) at {db_path}.")
+    typer.echo(f"and drop every llm-wiki table in {settings.db_url}.")
     typer.secho(f"{settings.raw_dir} will not be touched.", fg=typer.colors.GREEN)
     if not yes:
         typer.confirm("Proceed?", abort=True)
@@ -253,8 +248,12 @@ def reset(
     if wiki_dir.exists():
         shutil.rmtree(wiki_dir)
     wiki_dir.mkdir(parents=True, exist_ok=True)
-    for path in db_files:
-        path.unlink()
+
+    conn = connect(settings.db_url)
+    try:
+        conn.execute(DROP_ALL_SQL)
+    finally:
+        conn.close()
 
     typer.secho("Reset complete. Run `llm-wiki ingest` to rebuild.", fg=typer.colors.GREEN)
 
@@ -275,7 +274,7 @@ def link(
     added after their mentions were written, or after bulk changes.
     """
     _configure_logging(verbose)
-    conn = connect(settings.db_path)
+    conn = connect(settings.db_url)
     try:
         init_db(conn, embedding.embedding_dim(model_name=settings.embedding_model))
 

@@ -8,9 +8,9 @@ turn a successful ingest into a failed command — so callers wrap it in a guard
 from __future__ import annotations
 
 import json
-import sqlite3
 
 from llm_wiki.db import repo
+from llm_wiki.db.connection import Connection
 from llm_wiki.pipeline import DocumentOutcome
 
 
@@ -46,7 +46,7 @@ def _items_payload(outcome: DocumentOutcome) -> list[dict]:
 
 
 def record_run(
-    conn: sqlite3.Connection, outcomes: list[DocumentOutcome], total_seconds: float
+    conn: Connection, outcomes: list[DocumentOutcome], total_seconds: float
 ) -> int:
     """Write one ingest_run plus one ingest_doc per document. Returns run_id."""
     run_id = repo.start_run(conn)

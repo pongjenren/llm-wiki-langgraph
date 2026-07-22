@@ -33,7 +33,13 @@ class Settings:
     # Paths
     raw_dir: Path = field(default_factory=lambda: _env_path("LLM_WIKI_RAW_DIR", PROJECT_ROOT / "raw"))
     wiki_dir: Path = field(default_factory=lambda: _env_path("LLM_WIKI_WIKI_DIR", PROJECT_ROOT / "wiki"))
-    db_path: Path = field(default_factory=lambda: _env_path("LLM_WIKI_DB", PROJECT_ROOT / "llm_wiki.db"))
+    # PostgreSQL connection URL, e.g. postgresql://user:pass@localhost:5432/llm_wiki.
+    # The database server is expected to run elsewhere; this app only connects.
+    db_url: str = field(
+        default_factory=lambda: os.getenv(
+            "LLM_WIKI_DB_URL", "postgresql://llm_wiki:llm_wiki@localhost:5432/llm_wiki"
+        )
+    )
 
     # LLM
     model: str = field(default_factory=lambda: os.getenv("LLM_WIKI_MODEL", "openai/gpt-oss-120b"))
@@ -54,8 +60,8 @@ class Settings:
     )
 
     # --- candidate retrieval (recall-oriented; the LLM makes the final call) ---
-    # Cosine distance under which a page is pulled as a candidate. sqlite-vec
-    # returns distance, not similarity, so smaller means closer.
+    # Cosine distance under which a page is pulled as a candidate. pgvector's
+    # `<=>` returns distance, not similarity, so smaller means closer.
     embedding_candidate_threshold: float = field(
         default_factory=lambda: _env_float("LLM_WIKI_EMBEDDING_CANDIDATE_THRESHOLD", 0.45)
     )

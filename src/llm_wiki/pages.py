@@ -8,11 +8,11 @@ LLM never writes one and never renumbers citations.
 from __future__ import annotations
 
 import re
-import sqlite3
 from pathlib import Path
 from typing import Sequence
 
 from llm_wiki.db import repo
+from llm_wiki.db.connection import Connection
 
 REFERENCES_HEADING = "## References"
 
@@ -60,7 +60,7 @@ def headings(markdown: str) -> set[str]:
     return {m.strip() for m in _HEADING.findall(markdown)}
 
 
-def render_references(conn: sqlite3.Connection, page_id: int) -> str:
+def render_references(conn: Connection, page_id: int) -> str:
     rows = repo.list_references(conn, page_id)
     if not rows:
         return ""
@@ -70,7 +70,7 @@ def render_references(conn: sqlite3.Connection, page_id: int) -> str:
 
 
 def write_page(
-    conn: sqlite3.Connection,
+    conn: Connection,
     *,
     wiki_dir: Path,
     namespace: str,
@@ -83,7 +83,7 @@ def write_page(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     page_id_row = conn.execute(
-        "SELECT page_id FROM wiki_pages WHERE namespace = ? AND page_name = ?",
+        "SELECT page_id FROM wiki_pages WHERE namespace = %s AND page_name = %s",
         (namespace, page_name),
     ).fetchone()
 
@@ -113,7 +113,7 @@ def read_page(wiki_dir: Path, namespace: str, page_name: str) -> str:
     return strip_references(path.read_text(encoding="utf-8"))
 
 
-def write_index(conn: sqlite3.Connection, *, wiki_dir: Path, namespace: str) -> Path:
+def write_index(conn: Connection, *, wiki_dir: Path, namespace: str) -> Path:
     """Regenerate the namespace index from the database."""
     rows = repo.list_pages(conn, namespace)
     path = wiki_dir / namespace / "index.md"
