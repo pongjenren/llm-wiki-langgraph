@@ -52,9 +52,9 @@ class Settings:
 
     # Entity resolution
     #
-    # Resolution is a funnel: an exact alias hit, then a cheap "strong signal"
-    # auto-accept, then — only for the genuinely ambiguous cases — candidates
-    # from both the vector index and string matching are handed to an LLM judge.
+    # Resolution is a funnel: an exact alias hit, then — for everything else —
+    # candidates from both the vector index and string matching are handed to an
+    # LLM judge.
     embedding_model: str = field(
         default_factory=lambda: os.getenv("LLM_WIKI_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
     )
@@ -72,15 +72,6 @@ class Settings:
     # How many candidates (at most) to hand the LLM judge.
     resolve_candidate_limit: int = field(
         default_factory=lambda: _env_int("LLM_WIKI_RESOLVE_CANDIDATE_LIMIT", 5)
-    )
-
-    # --- strong-signal auto-accept (precision-oriented; skips the LLM) ---
-    # A near-exact match on either signal is accepted without asking the LLM.
-    embedding_autoaccept_threshold: float = field(
-        default_factory=lambda: _env_float("LLM_WIKI_EMBEDDING_AUTOACCEPT_THRESHOLD", 0.10)
-    )
-    string_autoaccept_threshold: float = field(
-        default_factory=lambda: _env_float("LLM_WIKI_STRING_AUTOACCEPT_THRESHOLD", 95.0)
     )
 
     @property

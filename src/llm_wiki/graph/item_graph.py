@@ -26,20 +26,6 @@ def build_item_graph(deps: Deps):
     """Compile the stage-2 graph."""
     settings = deps.settings
 
-    def _strong_signal(
-        emb: list[PageCandidate], strings: list[PageCandidate]
-    ) -> PageCandidate | None:
-        """A near-exact match on either signal, accepted without asking the LLM.
-
-        String first: a name that is character-for-character almost the page's own
-        (a typo, a plural, different casing) is the cheapest, safest hit there is.
-        """
-        if strings and strings[0].score >= settings.string_autoaccept_threshold:
-            return strings[0]
-        if emb and emb[0].score <= settings.embedding_autoaccept_threshold:
-            return emb[0]
-        return None
-
     def _merge_candidates(
         emb: list[PageCandidate], strings: list[PageCandidate]
     ) -> list[PageCandidate]:
@@ -52,9 +38,8 @@ def build_item_graph(deps: Deps):
     async def resolve_entity(state: ItemState) -> ItemState:
         """Find the page this item belongs to.
 
-        A funnel: an exact alias hit, then a cheap strong-signal auto-accept, and
-        only for genuinely ambiguous items are candidates from both the vector
-        index and string matching handed to an LLM to judge.
+        A funnel: an exact alias hit, then — for everything else — candidates from
+        both the vector index and string matching are handed to an LLM to judge.
         """
         item = state["item"]
         namespace = state["namespace"]
@@ -89,25 +74,14 @@ def build_item_graph(deps: Deps):
             settings.resolve_candidate_limit,
         )
 
-        # (2) Strong signal — accept without the LLM.
-        strong = _strong_signal(emb_candidates, string_candidates)
-        if strong is not None:
-            log.info("%r resolves to page #%s (%s, auto)", item.name, strong.page_id, strong.how)
-            return {
-                "is_new_page": False,
-                "page_id": strong.page_id,
-                "page_name": strong.page_name,
-                "matched_how": strong.how,
-            }
-
         candidates = _merge_candidates(emb_candidates, string_candidates)
 
-        # (4) No candidate at all — nothing to resolve against.
+        # (2) No candidate at all — nothing to resolve against.
         if not candidates:
             log.info("new page for %r", item.name)
             return {"is_new_page": True, "page_name": item.name}
 
-        # (3) Ambiguous — let the LLM judge against name, aliases and description.
+        # (3) Let the LLM judge against name, aliases and description.
         decision = await deps.client.run_json(
             prompts.resolve_entity(item, candidates), ResolveDecision, label="resolve"
         )

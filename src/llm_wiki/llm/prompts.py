@@ -15,6 +15,7 @@ from llm_wiki.llm.schemas import ExtractedItem
 
 if TYPE_CHECKING:
     from llm_wiki.db.repo import PageCandidate
+    from llm_wiki.links import LinkCandidate
 
 
 def extract(filename: str, text: str) -> str:
@@ -229,6 +230,49 @@ Page:
 ---
 {page_markdown}
 ---
+""".strip()
+
+
+def _render_link_candidates(candidates: Sequence[LinkCandidate]) -> str:
+    lines = []
+    for c in candidates:
+        aliases = ", ".join(c.aliases) or "(none)"
+        origin = "yes" if c.from_source else "no"
+        seen = f' seen in text as: "{c.mention}"' if c.mention else ""
+        lines.append(
+            f"- [page_id={c.page_id}] {c.page_name} | aliases: {aliases} | "
+            f"same source document: {origin}{seen}"
+        )
+    return "\n".join(lines)
+
+
+def link_page(page_name: str, body: str, candidates: Sequence[LinkCandidate]) -> str:
+    return f"""
+Decide which mentions in a wiki page body should become cross-links to other
+pages in the same knowledge base.
+
+You are working on the page "{page_name}". Only the candidate pages listed below
+exist; never link to anything else. Pages marked "same source document: yes" were
+written from the same document as this page, so a mention of them here is very
+likely a genuine reference.
+
+Candidate target pages:
+{_render_link_candidates(candidates)}
+
+Page body:
+---
+{body}
+---
+
+Rules:
+- Link a phrase only when it genuinely refers to that exact candidate's
+  entity/concept. A merely related or same-topic page is NOT a link.
+- For each link, copy `anchor_text` verbatim from the body (same words, same
+  casing). Do not invent or paraphrase the anchor.
+- `target_page_id` must be one of the page_ids listed above.
+- Do not link the page to itself. Link each target at most once, at its first
+  genuine mention.
+- If nothing should be linked, return an empty list.
 """.strip()
 
 

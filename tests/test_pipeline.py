@@ -12,16 +12,10 @@ from tests.conftest import ScriptedClient
 
 
 def _always_ask_llm(deps):
-    """Neutralise both auto-accept tiers so resolution always reaches the LLM judge.
-
-    Auto-accept depends on exact embedding distances, which vary by model; forcing
-    the judge path keeps these tests about the judge, not the embedding backend.
-    """
+    """Make every existing page a candidate so resolution always reaches the LLM judge."""
     deps.settings = dataclasses.replace(
         deps.settings,
         string_candidate_threshold=0.0,  # every existing page is a candidate
-        string_autoaccept_threshold=101.0,  # unreachable: never string auto-accept
-        embedding_autoaccept_threshold=-1.0,  # unreachable: never embedding auto-accept
     )
     return deps
 
@@ -191,11 +185,18 @@ async def test_merge_that_never_recovers_is_flagged(make_deps, docs, conn, setti
 
 
 class VariantNameClient(ScriptedClient):
-    """The same entity appears under a singular and a plural name."""
+    """The same entity appears under a singular and a plural name.
+
+    The plural is a string candidate for the singular page; the LLM judge, given
+    that candidate, confirms it is the same entity.
+    """
 
     def extract_items(self, document_index: int) -> list[ExtractedItem]:
         name = "Self-attention network" if document_index == 1 else "Self-attention networks"
         return [ExtractedItem(name=name, type="concept", description=f"Described.")]
+
+    def resolve(self) -> ResolveDecision:
+        return ResolveDecision(matched_page_id=1, reason="plural of the same concept")
 
     def create_page(self) -> str:
         return "# Self-attention network\n\nProcesses sequences in parallel [1].\n"
@@ -218,7 +219,7 @@ async def test_name_variants_resolve_to_one_page(make_deps, doc, conn):
     alias = conn.execute(
         "SELECT type FROM page_aliases WHERE query_name = 'self-attention networks'"
     ).fetchone()
-    assert alias["type"] == "string_sim"
+    assert alias["type"] == "llm_sim"
 
 
 class DistinctEntitiesClient(ScriptedClient):

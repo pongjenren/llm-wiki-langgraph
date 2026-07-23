@@ -60,11 +60,10 @@ are casefolded and whitespace-collapsed). On a miss, candidates are gathered fro
 *two* signals — a vector search over page names (only the *name* is embedded;
 mixing the description in measures topical similarity rather than identity) and
 string matching over existing aliases (rapidfuzz `token_sort_ratio`, which catches
-typos, plurals and casing the embeddings rank too far apart). A near-exact match
-on either signal is accepted outright; otherwise the candidates, together with the
-item's aliases and description, are handed to an LLM that decides whether it is the
-same entity or a new one. However a name resolves, it is recorded as an alias
-(`embedding_sim` / `string_sim` / `llm_sim`) so the next lookup for that name is an
+typos, plurals and casing the embeddings rank too far apart). The candidates,
+together with the item's aliases and description, are handed to an LLM that decides
+whether it is the same entity or a new one. However a name resolves, it is recorded as an alias
+(`llm_sim`) so the next lookup for that name is an
 exact hit — which also lets the LLM's verdicts converge over time. A low-confidence
 LLM match still merges but flags the page for review.
 
@@ -78,16 +77,22 @@ still written, but flagged `needs_review` in the database, banner-marked in the
 page, and starred in `index.md`.
 
 **Cross-linking.** Once pages exist, a mention of one page inside another (same
-namespace) becomes a markdown link — `TSMC` → `[TSMC](TSMC.md)` — recorded in
-`wiki_links`. Matching scans the `page_aliases` dictionary with an Aho-Corasick
-automaton, so per-page cost follows the page length, not the size of the
-knowledge base. It is case- and whitespace-insensitive, respects word
-boundaries, prefers the longest alias when several overlap, links each target at
-its first mention only, and skips code, headings, and existing links. Ingest
-links incrementally — only the pages a run touched, so they cross-link to each
-other and to any existing page they mention. `llm-wiki link` relinks a whole
-namespace to backfill links *into* pages that were added after their mentions
-were written. Re-linking is idempotent: sibling-page links are unwrapped before
+namespace) can become a markdown link — `TSMC` → `[TSMC](TSMC.md)` — recorded in
+`wiki_links`. An alias match no longer links on its own; it only nominates a
+candidate. Each page being linked is handed two candidate lists: the pages
+written from the *same source document* (strong references), and the pages whose
+aliases appear in its body (an Aho-Corasick scan of the `page_aliases`
+dictionary, so this cost follows the page length, not the size of the knowledge
+base). An LLM judges which mentions are genuine cross-references. Its picks are
+then verified and applied *without* the model: every target must be a real
+candidate page, and each approved anchor is spliced by the same matcher — case-
+and whitespace-insensitive, respecting word boundaries and protected regions
+(code, headings, existing links), longest anchor wins, each target linked at its
+first mention only. Ingest links incrementally — only the pages a run touched, so
+they cross-link to each other and to any existing page they mention. `llm-wiki
+link` relinks a whole namespace to backfill links *into* pages that were added
+after their mentions were written (no shared-source list there, only the alias
+candidates). Re-linking is idempotent: sibling-page links are unwrapped before
 each pass, so pages are always relinked from a clean body.
 
 ## Setup

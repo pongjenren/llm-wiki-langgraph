@@ -61,24 +61,39 @@ def _resolve_targets(path: Optional[Path], namespace: Optional[str]) -> list[tup
     return [(namespace, path)]
 
 
-def _link_touched_pages(conn, outcomes: list[DocumentOutcome]) -> None:
+async def _link_touched_pages(conn, client, outcomes: list[DocumentOutcome]) -> None:
     """Relink the pages this run created or merged into.
 
     Incremental by design: only pages touched here are rescanned, so they link
     to one another and to any existing page they mention. Links *into* a new page
     from pages left untouched are the job of `llm-wiki link` (full reconcile).
     Best-effort -- a linking failure must not fail an otherwise good ingest.
-    """
-    touched: dict[str, set[int]] = {}
-    for outcome in outcomes:
-        for item in outcome.items:
-            if item.error is None and item.page_id is not None:
-                touched.setdefault(outcome.namespace, set()).add(item.page_id)
 
-    for namespace, page_ids in touched.items():
+    Pages written from the same document are each other's first-list link
+    candidates, so they are grouped per namespace as ``page_id -> siblings``.
+    """
+    touched: dict[str, dict[int, set[int]]] = {}
+    for outcome in outcomes:
+        page_ids = {
+            item.page_id
+            for item in outcome.items
+            if item.error is None and item.page_id is not None
+        }
+        if not page_ids:
+            continue
+        siblings = touched.setdefault(outcome.namespace, {})
+        for page_id in page_ids:
+            siblings.setdefault(page_id, set()).update(page_ids - {page_id})
+
+    for namespace, siblings in touched.items():
         try:
-            links.link_pages(
-                conn, wiki_dir=settings.wiki_dir, namespace=namespace, page_ids=sorted(page_ids)
+            await links.link_pages(
+                conn,
+                wiki_dir=settings.wiki_dir,
+                namespace=namespace,
+                page_ids=sorted(siblings),
+                client=client,
+                source_siblings=siblings,
             )
         except Exception as exc:
             log.warning("failed to link pages in namespace %s: %s", namespace, exc)
@@ -166,7 +181,7 @@ def ingest(
                 telemetry.record_run(conn, outcomes, elapsed)
             except Exception as exc:  # telemetry must never fail an ingest
                 log.warning("failed to record ingest telemetry: %s", exc)
-            _link_touched_pages(conn, outcomes)
+            await _link_touched_pages(conn, client, outcomes)
             return _report(outcomes)
         finally:
             conn.close()
@@ -273,48 +288,63 @@ def link(
     added after their mentions were written, or after bulk changes.
     """
     _configure_logging(verbose)
-    conn = connect(settings.db_url)
-    try:
-        init_db(conn, embedding.embedding_dim(model_name=settings.embedding_model))
 
-        if namespace is not None:
-            namespaces = [namespace]
-        else:
-            namespaces = [
-                row["namespace"]
-                for row in conn.execute(
-                    "SELECT DISTINCT namespace FROM wiki_pages ORDER BY namespace"
+    if not settings.openrouter_api_key:
+        typer.secho(
+            "OPENROUTER_API_KEY is not set. Copy .env.example to .env and fill it in.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=2)
+
+    async def run() -> None:
+        conn = connect(settings.db_url)
+        try:
+            init_db(conn, embedding.embedding_dim(model_name=settings.embedding_model))
+
+            if namespace is not None:
+                namespaces = [namespace]
+            else:
+                namespaces = [
+                    row["namespace"]
+                    for row in conn.execute(
+                        "SELECT DISTINCT namespace FROM wiki_pages ORDER BY namespace"
+                    )
+                ]
+            if not namespaces:
+                typer.echo("No pages to link.")
+                return
+
+            client = LLMClient()
+            total_changed = 0
+            for ns in namespaces:
+                page_ids = [row["page_id"] for row in repo.list_pages(conn, ns)]
+                results = await links.link_pages(
+                    conn,
+                    wiki_dir=settings.wiki_dir,
+                    namespace=ns,
+                    page_ids=page_ids,
+                    client=client,
+                    dry_run=dry_run,
                 )
-            ]
-        if not namespaces:
-            typer.echo("No pages to link.")
-            return
+                changed = [r for r in results if r.changed]
+                total_changed += len(changed)
+                link_count = sum(len(r.links) for r in results)
+                verb = "would update" if dry_run else "updated"
+                typer.echo(
+                    f"{ns}: {verb} {len(changed)} of {len(results)} page(s), "
+                    f"{link_count} link(s) total."
+                )
+                for r in changed:
+                    typer.secho(
+                        f"    · {r.page_name}: {len(r.links)} link(s)", fg=typer.colors.CYAN
+                    )
 
-        total_changed = 0
-        for ns in namespaces:
-            page_ids = [row["page_id"] for row in repo.list_pages(conn, ns)]
-            results = links.link_pages(
-                conn,
-                wiki_dir=settings.wiki_dir,
-                namespace=ns,
-                page_ids=page_ids,
-                dry_run=dry_run,
-            )
-            changed = [r for r in results if r.changed]
-            total_changed += len(changed)
-            link_count = sum(len(r.links) for r in results)
-            verb = "would update" if dry_run else "updated"
-            typer.echo(
-                f"{ns}: {verb} {len(changed)} of {len(results)} page(s), "
-                f"{link_count} link(s) total."
-            )
-            for r in changed:
-                typer.secho(f"    · {r.page_name}: {len(r.links)} link(s)", fg=typer.colors.CYAN)
+            if dry_run and total_changed:
+                typer.echo("\nDry run: no files were written.")
+        finally:
+            conn.close()
 
-        if dry_run and total_changed:
-            typer.echo("\nDry run: no files were written.")
-    finally:
-        conn.close()
+    asyncio.run(run())
 
 
 @app.command()

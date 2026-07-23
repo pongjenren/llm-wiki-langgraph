@@ -52,3 +52,22 @@ class Review(BaseModel):
         default_factory=list,
         description="Concrete problems to fix. Required when the verdict is 'fail'.",
     )
+
+
+class ProposedLink(BaseModel):
+    """One cross-page link the LLM wants to add to a page body."""
+
+    target_page_id: int = Field(
+        description="page_id of the candidate page this mention refers to. "
+        "Must be one of the offered candidates."
+    )
+    anchor_text: str = Field(
+        description="The exact surface phrase from the body to turn into the link, "
+        "copied verbatim (including its original casing)."
+    )
+
+
+class LinkDecision(BaseModel):
+    """Which mentions in a page body should become cross-page links."""
+
+    links: list[ProposedLink] = Field(default_factory=list)

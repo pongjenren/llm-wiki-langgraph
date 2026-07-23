@@ -1,15 +1,21 @@
 """Cross-page linking.
 
-When one page's body mentions the name of another page in the same namespace,
-that mention is turned into a markdown link (``TSMC`` -> ``[TSMC](TSMC.md)``) and
-the relationship is recorded in the ``wiki_links`` table.
+When one page's body mentions another page in the same namespace, that mention
+is turned into a markdown link (``TSMC`` -> ``[TSMC](TSMC.md)``) and the
+relationship is recorded in the ``wiki_links`` table.
 
-The matcher scans a page against every alias in the namespace (see
-``page_aliases``) using an Aho-Corasick automaton, so the per-page cost is
-proportional to the page length and independent of how many pages the knowledge
-base holds. Matching is case-insensitive and whitespace-insensitive, respects
-word boundaries, prefers the longest alias when several overlap, and links each
-target only at its first mention.
+Candidates are gathered but not applied blindly. Two lists are offered to an LLM
+judge: the pages that share a source document with this one (strong references),
+and the pages whose aliases appear in the body (an Aho-Corasick scan of the
+``page_aliases`` dictionary). The LLM decides which mentions are genuine
+cross-references; a name matching an alias is no longer enough on its own.
+
+Whatever the LLM returns is then applied deterministically, never by the model:
+each approved target must be a real candidate page (checked without the LLM), and
+each approved anchor is spliced into the body by the same matcher the candidate
+scan uses -- case- and whitespace-insensitive, respecting word boundaries and
+protected regions (code, headings, existing links), longest anchor wins, and each
+target linked only at its first mention.
 
 Re-running is safe: existing links to sibling pages are unwrapped back to plain
 text before matching, so a page is always relinked from a clean body and the
@@ -29,6 +35,9 @@ import ahocorasick
 from llm_wiki import pages
 from llm_wiki.db import repo
 from llm_wiki.db.connection import Connection, transaction
+from llm_wiki.llm import prompts
+from llm_wiki.llm.client import LLMClient
+from llm_wiki.llm.schemas import LinkDecision
 
 log = logging.getLogger(__name__)
 
@@ -263,13 +272,87 @@ def _apply(body: str, matches: Sequence[_Match]) -> tuple[str, list[tuple[int, s
     return "".join(out), links
 
 
-def relink_body(
-    body: str, automaton: ahocorasick.Automaton | None, src_page_id: int
-) -> tuple[str, list[tuple[int, str, str]]]:
-    """Relink a single page body. ``body`` must be free of banner and references."""
-    unwrapped = unwrap_local_links(body)
-    matches = find_matches(unwrapped, automaton, src_page_id)
-    return _apply(unwrapped, matches)
+@dataclass
+class LinkCandidate:
+    """A page the LLM judge may link the current page to.
+
+    ``from_source`` marks the pages written from the same document (the first
+    list); ``mention`` carries the surface text an alias scan already found in the
+    body (the second list), or None when only the shared-source signal put the
+    page here.
+    """
+
+    page_id: int
+    page_name: str
+    aliases: list[str]
+    from_source: bool
+    mention: str | None
+
+
+def _gather_candidates(
+    body: str,
+    automaton: ahocorasick.Automaton | None,
+    src_page_id: int,
+    sibling_ids: set[int],
+    name_by_page: dict[int, str],
+    alias_by_page: dict[int, set[int]],
+) -> list[LinkCandidate]:
+    """The two candidate lists, unioned into one catalogue for the LLM.
+
+    List one is the pages sharing a source with this page; list two is every page
+    an alias scan of the body turns up. A page can be on both.
+    """
+    mention_by_page: dict[int, str] = {}
+    for m in find_matches(body, automaton, src_page_id):
+        mention_by_page.setdefault(m.page_id, body[m.start : m.end + 1])
+
+    candidate_ids = set(mention_by_page) | (sibling_ids - {src_page_id})
+    candidates: list[LinkCandidate] = []
+    for page_id in sorted(candidate_ids):
+        page_name = name_by_page.get(page_id)
+        if page_name is None:  # not a real page in this namespace; skip
+            continue
+        candidates.append(
+            LinkCandidate(
+                page_id=page_id,
+                page_name=page_name,
+                aliases=sorted(alias_by_page.get(page_id, set())),
+                from_source=page_id in sibling_ids,
+                mention=mention_by_page.get(page_id),
+            )
+        )
+    return candidates
+
+
+def _approved_matches(
+    body: str,
+    decision: LinkDecision,
+    catalog: dict[int, LinkCandidate],
+    src_page_id: int,
+) -> list[_Match]:
+    """Turn the LLM's picks into concrete matches, dropping anything unreal.
+
+    Existence is checked here, not by the model: a target that is not one of the
+    offered candidates is discarded. The approved (anchor -> page) pairs are then
+    run through the same matcher the candidate scan uses, so every deterministic
+    guard (word boundaries, protected regions, first mention, longest anchor)
+    still applies to the final splice.
+    """
+    entries: list[tuple[str, int, str]] = []
+    for link in decision.links:
+        candidate = catalog.get(link.target_page_id)
+        if candidate is None:
+            log.warning(
+                "link judge chose page_id %s, not an offered candidate; dropping",
+                link.target_page_id,
+            )
+            continue
+        anchor = repo.normalize_name(link.anchor_text)
+        if not anchor:
+            continue
+        entries.append((anchor, candidate.page_id, candidate.page_name))
+
+    return find_matches(body, build_automaton(entries), src_page_id)
 
 
 @dataclass
@@ -280,12 +363,41 @@ class LinkResult:
     links: list[tuple[int, str, str]] = field(default_factory=list)
 
 
-def link_pages(
+async def relink_body(
+    body: str,
+    *,
+    page_name: str,
+    automaton: ahocorasick.Automaton | None,
+    src_page_id: int,
+    sibling_ids: set[int],
+    name_by_page: dict[int, str],
+    alias_by_page: dict[int, set[int]],
+    client: LLMClient,
+) -> tuple[str, list[tuple[int, str, str]]]:
+    """Relink a single page body. ``body`` must be free of banner and references."""
+    unwrapped = unwrap_local_links(body)
+    candidates = _gather_candidates(
+        unwrapped, automaton, src_page_id, sibling_ids, name_by_page, alias_by_page
+    )
+    if not candidates:
+        return unwrapped, []
+
+    decision = await client.run_json(
+        prompts.link_page(page_name, unwrapped, candidates), LinkDecision, label="link"
+    )
+    catalog = {c.page_id: c for c in candidates}
+    matches = _approved_matches(unwrapped, decision, catalog, src_page_id)
+    return _apply(unwrapped, matches)
+
+
+async def link_pages(
     conn: Connection,
     *,
     wiki_dir: Path,
     namespace: str,
     page_ids: Sequence[int],
+    client: LLMClient,
+    source_siblings: dict[int, set[int]] | None = None,
     dry_run: bool = False,
 ) -> list[LinkResult]:
     """Relink the given pages against every page in their namespace.
@@ -294,10 +406,21 @@ def link_pages(
     it mentions -- including others created in the same batch. Pages *not* in
     ``page_ids`` are left untouched; a full-namespace reconcile is what
     ``page_ids = all pages`` is for.
+
+    ``source_siblings`` maps each page to the other pages written from the same
+    document, forming the first candidate list. It is empty for a full reconcile,
+    where there is no single source to group by.
     """
-    entries = [(r["query_name"], r["page_id"], r["page_name"]) for r in
-               repo.load_link_dictionary(conn, namespace)]
-    automaton = build_automaton(entries)
+    dict_rows = repo.load_link_dictionary(conn, namespace)
+    automaton = build_automaton(
+        [(r["query_name"], r["page_id"], r["page_name"]) for r in dict_rows]
+    )
+    name_by_page = {r["page_id"]: r["page_name"] for r in dict_rows}
+    alias_by_page: dict[int, set[int]] = {}
+    for r in dict_rows:
+        alias_by_page.setdefault(r["page_id"], set()).add(r["query_name"])
+
+    source_siblings = source_siblings or {}
 
     results: list[LinkResult] = []
     for page_id in page_ids:
@@ -309,7 +432,16 @@ def link_pages(
         # read_page already strips the References section; drop the banner too so
         # matching sees only real content.
         body = pages.strip_review_banner(pages.read_page(wiki_dir, namespace, page_name))
-        new_body, links = relink_body(body, automaton, src_page_id=page_id)
+        new_body, links = await relink_body(
+            body,
+            page_name=page_name,
+            automaton=automaton,
+            src_page_id=page_id,
+            sibling_ids=source_siblings.get(page_id, set()),
+            name_by_page=name_by_page,
+            alias_by_page=alias_by_page,
+            client=client,
+        )
         changed = new_body != body
         results.append(LinkResult(page_id, page_name, changed, links))
 
