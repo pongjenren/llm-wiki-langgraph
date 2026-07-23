@@ -18,17 +18,11 @@ from pgvector.psycopg2 import register_vector
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
-# Name of the table holding page embeddings. It is created at runtime rather
-# than in schema.sql because its dimension depends on the configured embedding
-# model.
-EMBEDDING_TABLE = "wiki_page_embeddings"
-
 # Drops every table this app owns (for `llm-wiki reset`). Only our own tables,
 # never the whole schema: the database server may be shared with other apps.
 # CASCADE clears the foreign-key web without needing a specific drop order.
-DROP_ALL_SQL = f"""
+DROP_ALL_SQL = """
 DROP TABLE IF EXISTS
-    {EMBEDDING_TABLE},
     wiki_links,
     wiki_source,
     ingest_doc,
@@ -81,23 +75,9 @@ def connect(db_url: str) -> Connection:
     return Connection(raw)
 
 
-def init_db(conn: Connection, embedding_dim: int) -> None:
+def init_db(conn: Connection) -> None:
     """Create tables if absent. Safe to call on every run."""
     conn.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
-    conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {EMBEDDING_TABLE} (
-            page_id   BIGINT PRIMARY KEY REFERENCES wiki_pages (page_id) ON DELETE CASCADE,
-            embedding vector({embedding_dim}) NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        f"""
-        CREATE INDEX IF NOT EXISTS idx_{EMBEDDING_TABLE}_hnsw
-        ON {EMBEDDING_TABLE} USING hnsw (embedding vector_cosine_ops)
-        """
-    )
 
 
 @contextmanager

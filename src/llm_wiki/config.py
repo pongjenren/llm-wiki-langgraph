@@ -56,7 +56,14 @@ class Settings:
     # candidates from both the vector index and string matching are handed to an
     # LLM judge.
     embedding_model: str = field(
-        default_factory=lambda: os.getenv("LLM_WIKI_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+        default_factory=lambda: os.getenv("LLM_WIKI_EMBEDDING_MODEL", "nvidia/NV-Embed-v2")
+    )
+    # OpenAI-compatible /v1/embeddings endpoint serving the model above (an
+    # NV-Embed-v2 deployment on vLLM / TEI / NIM, or any compatible server). The
+    # vector dimension is not configured here: it is fixed in schema.sql
+    # (wiki_pages.embedding) and must match whatever this endpoint returns.
+    embedding_base_url: str = field(
+        default_factory=lambda: os.getenv("LLM_WIKI_EMBEDDING_BASE_URL", "http://localhost:8000/v1")
     )
 
     # --- candidate retrieval (recall-oriented; the LLM makes the final call) ---
@@ -77,6 +84,12 @@ class Settings:
     @property
     def openrouter_api_key(self) -> str | None:
         return os.getenv("OPENROUTER_API_KEY")
+
+    @property
+    def embedding_api_key(self) -> str | None:
+        # Optional: self-hosted endpoints often need no key. The OpenAI SDK still
+        # requires a non-empty string, so embed() substitutes a placeholder.
+        return os.getenv("LLM_WIKI_EMBEDDING_API_KEY")
 
 
 settings = Settings()

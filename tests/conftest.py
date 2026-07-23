@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import math
 import os
 from pathlib import Path
 
@@ -86,6 +88,33 @@ class ScriptedClient:
         return sum(1 for call in self.calls if call.startswith(label_prefix))
 
 
+# The real embedder now calls an external OpenAI-compatible endpoint. Tests must
+# stay offline and deterministic, so every test embeds through a stand-in: a
+# unit vector derived from the text. Its width must match wiki_pages.embedding in
+# schema.sql. Resolution tests do not depend on the actual geometry (they force
+# string candidates and script the LLM judge); they only need embed() to return
+# a consistent vector.
+_FAKE_EMBEDDING_DIM = 4096
+
+
+def _fake_embed(text: str, *, model_name: str | None = None) -> list[float]:
+    seed = hashlib.sha256(text.encode("utf-8")).digest()
+    vals: list[float] = []
+    counter = 0
+    while len(vals) < _FAKE_EMBEDDING_DIM:
+        block = hashlib.sha256(seed + counter.to_bytes(2, "big")).digest()
+        vals.extend(byte / 255.0 - 0.5 for byte in block)
+        counter += 1
+    vals = vals[:_FAKE_EMBEDDING_DIM]
+    norm = math.sqrt(sum(v * v for v in vals)) or 1.0
+    return [v / norm for v in vals]
+
+
+@pytest.fixture(autouse=True)
+def fake_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(embedding, "embed", _fake_embed)
+
+
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     (tmp_path / "raw" / "ml").mkdir(parents=True)
@@ -110,14 +139,14 @@ def settings(workspace: Path) -> Settings:
 
 
 @pytest.fixture
-def conn(settings: Settings):
+def conn(settings: Settings, fake_embeddings: None):
     try:
         connection = connect(settings.db_url)
     except Exception as exc:  # no reachable Postgres -> nothing to test against
         pytest.skip(f"PostgreSQL not available at {settings.db_url}: {exc}")
     # Start each test from a clean schema so tests never see each other's rows.
     connection.execute(DROP_ALL_SQL)
-    init_db(connection, embedding.embedding_dim(model_name=settings.embedding_model))
+    init_db(connection)
     yield connection
     connection.close()
 

@@ -15,7 +15,6 @@ dependencies = [
     "pydantic>=2.13.4",
     "python-dotenv>=1.2.2",
     "rapidfuzz>=3.0",
-    "sentence-transformers>=5.6.0",
     "typer>=0.27.0",
     # Dashboard web server (read-only ingest status page).
     "starlette>=0.40",

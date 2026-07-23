@@ -1,7 +1,11 @@
-"""Local sentence-transformers embeddings.
+"""Page-name embeddings via an OpenAI-compatible embeddings API.
 
-The model is loaded lazily and cached: importing this module must stay cheap,
-since loading weights takes seconds and most CLI paths never need them.
+Embeddings serve entity resolution only (see :func:`identity_text`): a page is
+indexed under a vector of its name so an incoming item can find the pages that
+might be the same entity. The vectors come from an external OpenAI-compatible
+``/v1/embeddings`` endpoint (e.g. an NV-Embed-v2 deployment on vLLM / TEI / NIM),
+so this module holds no model weights. The client is created lazily and cached,
+keeping import cheap for CLI paths that never embed.
 """
 
 from __future__ import annotations
@@ -12,28 +16,25 @@ from typing import TYPE_CHECKING
 from llm_wiki.config import settings
 
 if TYPE_CHECKING:
-    from sentence_transformers import SentenceTransformer
+    from openai import OpenAI
 
 
 @lru_cache(maxsize=1)
-def _model(name: str) -> "SentenceTransformer":
-    from sentence_transformers import SentenceTransformer
+def _client(base_url: str, api_key: str) -> "OpenAI":
+    from openai import OpenAI
 
-    return SentenceTransformer(name)
+    return OpenAI(base_url=base_url, api_key=api_key)
 
 
 def embed(text: str, *, model_name: str | None = None) -> list[float]:
-    """Embed a single string into a normalized vector."""
-    model = _model(model_name or settings.embedding_model)
-    vector = model.encode(text, normalize_embeddings=True)
-    return [float(x) for x in vector]
-
-
-def embedding_dim(*, model_name: str | None = None) -> int:
-    model = _model(model_name or settings.embedding_model)
-    # Renamed in sentence-transformers 5.x; keep working on older releases too.
-    getter = getattr(model, "get_embedding_dimension", None) or model.get_sentence_embedding_dimension
-    return int(getter())
+    """Embed a single string into a vector via the embeddings API."""
+    # The SDK rejects an empty key; unauthenticated endpoints ignore the value.
+    client = _client(settings.embedding_base_url, settings.embedding_api_key or "EMPTY")
+    response = client.embeddings.create(
+        model=model_name or settings.embedding_model,
+        input=text,
+    )
+    return [float(x) for x in response.data[0].embedding]
 
 
 def identity_text(name: str) -> str:

@@ -14,7 +14,7 @@ from typing import Any, Mapping, Sequence
 from pgvector import Vector
 from rapidfuzz import fuzz
 
-from llm_wiki.db.connection import EMBEDDING_TABLE, Connection
+from llm_wiki.db.connection import Connection
 
 _WHITESPACE = re.compile(r"\s+")
 
@@ -118,14 +118,14 @@ def find_page_candidates_by_embedding(
     """Up to `limit` nearest pages within `threshold` cosine distance, closest first.
 
     The `<=>` operator is pgvector's cosine distance (smaller is closer), so it
-    matches the sqlite-vec semantics the thresholds were tuned against.
+    matches the sqlite-vec semantics the thresholds were tuned against. Pages
+    without an embedding yet are skipped.
     """
     rows = conn.execute(
-        f"""
-        SELECT e.page_id, (e.embedding <=> %s) AS distance, p.page_name, p.type
-        FROM {EMBEDDING_TABLE} e
-        JOIN wiki_pages p ON p.page_id = e.page_id
-        WHERE p.namespace = %s
+        """
+        SELECT page_id, (embedding <=> %s) AS distance, page_name, type
+        FROM wiki_pages
+        WHERE namespace = %s AND embedding IS NOT NULL
         ORDER BY distance
         LIMIT %s
         """,
@@ -189,20 +189,36 @@ def find_page_candidates_by_string(
     return ranked[:limit]
 
 
-def insert_page(conn: Connection, *, page_name: str, namespace: str, type_: str) -> int:
+def insert_page(
+    conn: Connection,
+    *,
+    page_name: str,
+    namespace: str,
+    type_: str,
+    embedding: Sequence[float] | None = None,
+) -> int:
+    """Insert a page, optionally with its name embedding, and return its id."""
     row = conn.execute(
         """
-        INSERT INTO wiki_pages (page_name, namespace, type, create_time)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO wiki_pages (page_name, namespace, type, create_time, embedding)
+        VALUES (%s, %s, %s, %s, %s)
         RETURNING page_id
         """,
-        (page_name, namespace, type_, _now()),
+        (page_name, namespace, type_, _now(), None if embedding is None else Vector(embedding)),
     ).fetchone()
     return int(row["page_id"])
 
 
 def get_page(conn: Connection, page_id: int) -> Row | None:
-    return conn.execute("SELECT * FROM wiki_pages WHERE page_id = %s", (page_id,)).fetchone()
+    # Explicit columns, not SELECT *: the embedding column is a wide vector that
+    # metadata callers never need, and Postgres would otherwise fetch it TOASTed.
+    return conn.execute(
+        """
+        SELECT page_id, page_name, namespace, type, needs_review, create_time
+        FROM wiki_pages WHERE page_id = %s
+        """,
+        (page_id,),
+    ).fetchone()
 
 
 def set_needs_review(conn: Connection, page_id: int, flag: bool) -> None:
@@ -234,17 +250,6 @@ def upsert_alias(
         ON CONFLICT (namespace, query_name) DO NOTHING
         """,
         (namespace, normalize_name(name), page_id, type_),
-    )
-
-
-def upsert_embedding(conn: Connection, page_id: int, embedding: Sequence[float]) -> None:
-    conn.execute(
-        f"""
-        INSERT INTO {EMBEDDING_TABLE} (page_id, embedding)
-        VALUES (%s, %s)
-        ON CONFLICT (page_id) DO UPDATE SET embedding = EXCLUDED.embedding
-        """,
-        (page_id, Vector(embedding)),
     )
 
 

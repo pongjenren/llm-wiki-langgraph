@@ -11,7 +11,7 @@ from typing import Optional
 
 import typer
 
-from llm_wiki import embedding, links, loaders, telemetry
+from llm_wiki import links, loaders, telemetry
 from llm_wiki.config import PROJECT_ROOT, settings
 from llm_wiki.db import repo
 from llm_wiki.db.connection import connect, init_db
@@ -29,7 +29,7 @@ def _configure_logging(verbose: bool) -> None:
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(levelname)-7s %(name)s: %(message)s",
     )
-    for noisy in ("httpx", "openai", "sentence_transformers", "transformers"):
+    for noisy in ("httpx", "openai"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
@@ -171,7 +171,7 @@ def ingest(
     async def run() -> int:
         conn = connect(settings.db_url)
         try:
-            init_db(conn, embedding.embedding_dim(model_name=settings.embedding_model))
+            init_db(conn)
             start = time.monotonic()
             client = LLMClient()
             deps = Deps(conn=conn, client=client, settings=settings)
@@ -211,7 +211,7 @@ def status() -> None:
     """Show what is currently in the knowledge base."""
     conn = connect(settings.db_url)
     try:
-        init_db(conn, embedding.embedding_dim(model_name=settings.embedding_model))
+        init_db(conn)
         namespaces = conn.execute(
             "SELECT namespace, COUNT(*) AS pages, "
             "COUNT(*) FILTER (WHERE needs_review) AS flagged "
@@ -299,7 +299,7 @@ def link(
     async def run() -> None:
         conn = connect(settings.db_url)
         try:
-            init_db(conn, embedding.embedding_dim(model_name=settings.embedding_model))
+            init_db(conn)
 
             if namespace is not None:
                 namespaces = [namespace]

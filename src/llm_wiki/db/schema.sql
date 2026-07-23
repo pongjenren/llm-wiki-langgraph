@@ -1,5 +1,4 @@
--- Core ingest schema (PostgreSQL). The vector table is created separately (see
--- connection.py) because its dimension depends on the configured embedding model.
+-- Core ingest schema (PostgreSQL).
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -25,6 +24,12 @@ CREATE TABLE IF NOT EXISTS wiki_pages (
     type         TEXT        NOT NULL CHECK (type IN ('entity', 'concept')),
     needs_review BOOLEAN     NOT NULL DEFAULT FALSE,
     create_time  TIMESTAMPTZ NOT NULL,
+    -- Name embedding for entity resolution, dimension fixed to the deployed
+    -- model (NV-Embed-v2 = 4096). Nullable: a page can exist before it is
+    -- embedded. No ANN index -- pgvector's hnsw/ivfflat cap at 2000 dims -- so
+    -- resolution does an exact scan, fine at the page counts here. Change the
+    -- model's width? Change it here.
+    embedding    vector(4096),
     UNIQUE (namespace, page_name)
 );
 

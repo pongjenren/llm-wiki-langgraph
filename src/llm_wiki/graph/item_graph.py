@@ -138,10 +138,13 @@ def build_item_graph(deps: Deps):
         )
         with transaction(deps.conn):
             page_id = repo.insert_page(
-                deps.conn, page_name=item.name, namespace=namespace, type_=item.type
+                deps.conn,
+                page_name=item.name,
+                namespace=namespace,
+                type_=item.type,
+                embedding=vector,
             )
             _record_aliases(item, namespace, page_id, canonical=True)
-            repo.upsert_embedding(deps.conn, page_id, vector)
             reference_number = repo.link_source(
                 deps.conn, wiki_id=page_id, source_id=state["source_id"], namespace=namespace
             )
