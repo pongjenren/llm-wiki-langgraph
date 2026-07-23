@@ -111,40 +111,40 @@ class _ScriptedLLM:
         self.replies = replies
         self.prompts: list[str] = []
 
-    async def __call__(self, prompt: str, **kwargs):
+    def __call__(self, prompt: str, **kwargs):
         self.prompts.append(prompt)
         return self.replies[min(len(self.prompts) - 1, len(self.replies) - 1)]
 
 
-async def test_run_json_retries_and_feeds_back_the_error(monkeypatch):
+def test_run_json_retries_and_feeds_back_the_error(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     llm = _ScriptedLLM(["not json", '{"verdict": "maybe"}', '{"verdict": "pass", "issues": []}'])
     monkeypatch.setattr("llm_wiki.llm.client.query_LLM", llm)
 
     client = LLMClient(retries=2)
-    result = await client.run_json("review", Review, label="t")
+    result = client.run_json("review", Review, label="t")
 
     assert result.verdict == "pass"
     assert len(llm.prompts) == 3
     assert "was rejected" in llm.prompts[1], "the retry must tell the model what was wrong"
 
 
-async def test_run_json_gives_up_after_the_budget(monkeypatch):
+def test_run_json_gives_up_after_the_budget(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr("llm_wiki.llm.client.query_LLM", _ScriptedLLM(["nope"]))
 
     client = LLMClient(retries=1)
     with pytest.raises(LLMError, match="no valid JSON"):
-        await client.run_json("review", Review, label="t")
+        client.run_json("review", Review, label="t")
 
 
-async def test_query_llm_maps_provider_errors():
+def test_query_llm_maps_provider_errors():
     class FailingCompletions:
-        async def create(self, **kwargs):
+        def create(self, **kwargs):
             raise OpenAIError("402 insufficient credits")
 
     class FailingClient:
         chat = type("Chat", (), {"completions": FailingCompletions()})()
 
     with pytest.raises(LLMError, match="insufficient credits"):
-        await query_LLM("hi", client=FailingClient(), model="m", temperature=0.1, max_tokens=8, label="t")
+        query_LLM("hi", client=FailingClient(), model="m", temperature=0.1, max_tokens=8, label="t")

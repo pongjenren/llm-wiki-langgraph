@@ -363,7 +363,7 @@ class LinkResult:
     links: list[tuple[int, str, str]] = field(default_factory=list)
 
 
-async def relink_body(
+def relink_body(
     body: str,
     *,
     page_name: str,
@@ -382,7 +382,7 @@ async def relink_body(
     if not candidates:
         return unwrapped, []
 
-    decision = await client.run_json(
+    decision = client.run_json(
         prompts.link_page(page_name, unwrapped, candidates), LinkDecision, label="link"
     )
     catalog = {c.page_id: c for c in candidates}
@@ -390,7 +390,7 @@ async def relink_body(
     return _apply(unwrapped, matches)
 
 
-async def link_pages(
+def link_pages(
     conn: Connection,
     *,
     wiki_dir: Path,
@@ -432,7 +432,7 @@ async def link_pages(
         # read_page already strips the References section; drop the banner too so
         # matching sees only real content.
         body = pages.strip_review_banner(pages.read_page(wiki_dir, namespace, page_name))
-        new_body, links = await relink_body(
+        new_body, links = relink_body(
             body,
             page_name=page_name,
             automaton=automaton,

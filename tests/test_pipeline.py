@@ -19,7 +19,6 @@ def _always_ask_llm(deps):
     )
     return deps
 
-pytestmark = pytest.mark.asyncio
 
 PAGE_V1 = """# Transformer
 
@@ -89,9 +88,9 @@ def docs(doc):
     )
 
 
-async def test_new_document_creates_page(make_deps, docs, settings, conn):
+def test_new_document_creates_page(make_deps, docs, settings, conn):
     deps = make_deps(TransformerClient())
-    outcome = await ingest_document(deps, "ml", docs[0])
+    outcome = ingest_document(deps, "ml", docs[0])
 
     assert outcome.ok
     assert len(outcome.items) == 1
@@ -106,23 +105,23 @@ async def test_new_document_creates_page(make_deps, docs, settings, conn):
     assert (settings.wiki_dir / "ml" / "index.md").exists()
 
 
-async def test_reingesting_same_bytes_short_circuits(make_deps, docs):
+def test_reingesting_same_bytes_short_circuits(make_deps, docs):
     client = TransformerClient()
     deps = make_deps(client)
-    await ingest_document(deps, "ml", docs[0])
+    ingest_document(deps, "ml", docs[0])
     calls_before = list(client.calls)
 
-    outcome = await ingest_document(deps, "ml", docs[0])
+    outcome = ingest_document(deps, "ml", docs[0])
 
     assert outcome.skipped
     assert outcome.items == []
     assert client.calls == calls_before, "a duplicate document must not reach the LLM"
 
 
-async def test_second_document_merges_into_existing_page(make_deps, docs, settings, conn):
+def test_second_document_merges_into_existing_page(make_deps, docs, settings, conn):
     deps = make_deps(TransformerClient())
-    await ingest_document(deps, "ml", docs[0])
-    outcome = await ingest_document(deps, "ml", docs[1])
+    ingest_document(deps, "ml", docs[0])
+    outcome = ingest_document(deps, "ml", docs[1])
 
     item = outcome.items[0]
     assert not item.is_new_page
@@ -139,9 +138,9 @@ async def test_second_document_merges_into_existing_page(make_deps, docs, settin
     assert conn.execute("SELECT COUNT(*) AS n FROM wiki_source").fetchone()["n"] == 2
 
 
-async def test_aliases_from_extraction_are_recorded(make_deps, docs, conn):
+def test_aliases_from_extraction_are_recorded(make_deps, docs, conn):
     deps = make_deps(TransformerClient())
-    await ingest_document(deps, "ml", docs[0])
+    ingest_document(deps, "ml", docs[0])
 
     rows = conn.execute("SELECT query_name, type FROM page_aliases").fetchall()
     by_name = {row["query_name"]: row["type"] for row in rows}
@@ -156,11 +155,11 @@ class LossyMergeClient(TransformerClient):
         return PAGE_MERGED_LOSSY if attempt == 0 else PAGE_MERGED
 
 
-async def test_merge_that_drops_a_section_is_retried(make_deps, docs, settings):
+def test_merge_that_drops_a_section_is_retried(make_deps, docs, settings):
     client = LossyMergeClient()
     deps = make_deps(client)
-    await ingest_document(deps, "ml", docs[0])
-    outcome = await ingest_document(deps, "ml", docs[1])
+    ingest_document(deps, "ml", docs[0])
+    outcome = ingest_document(deps, "ml", docs[1])
 
     assert client.count("merge-page") == 2
     assert not outcome.items[0].needs_review
@@ -173,10 +172,10 @@ class AlwaysLossyMergeClient(TransformerClient):
         return PAGE_MERGED_LOSSY
 
 
-async def test_merge_that_never_recovers_is_flagged(make_deps, docs, conn, settings):
+def test_merge_that_never_recovers_is_flagged(make_deps, docs, conn, settings):
     deps = make_deps(AlwaysLossyMergeClient())
-    await ingest_document(deps, "ml", docs[0])
-    outcome = await ingest_document(deps, "ml", docs[1])
+    ingest_document(deps, "ml", docs[0])
+    outcome = ingest_document(deps, "ml", docs[1])
 
     assert outcome.items[0].needs_review
     assert conn.execute("SELECT needs_review FROM wiki_pages").fetchone()["needs_review"] == 1
@@ -205,13 +204,13 @@ class VariantNameClient(ScriptedClient):
         return "# Self-attention network\n\nParallel [1]. No recurrence [2].\n"
 
 
-async def test_name_variants_resolve_to_one_page(make_deps, doc, conn):
+def test_name_variants_resolve_to_one_page(make_deps, doc, conn):
     a = doc("a.md", "Self-attention networks process sequences in parallel.\n")
     b = doc("b.md", "Attention-based models avoid recurrence entirely.\n")
     deps = make_deps(VariantNameClient())
 
-    await ingest_document(deps, "ml", a)
-    outcome = await ingest_document(deps, "ml", b)
+    ingest_document(deps, "ml", a)
+    outcome = ingest_document(deps, "ml", b)
 
     assert not outcome.items[0].is_new_page, "the plural variant must not create a second page"
     assert outcome.items[0].reference_number == 2
@@ -228,13 +227,13 @@ class DistinctEntitiesClient(ScriptedClient):
         return [ExtractedItem(name=name, type="concept", description="Described.")]
 
 
-async def test_distinct_entities_get_separate_pages(make_deps, doc, conn):
+def test_distinct_entities_get_separate_pages(make_deps, doc, conn):
     a = doc("a.md", "About transformers.\n")
     b = doc("b.md", "About convolutional networks.\n")
     deps = make_deps(DistinctEntitiesClient())
 
-    await ingest_document(deps, "ml", a)
-    outcome = await ingest_document(deps, "ml", b)
+    ingest_document(deps, "ml", a)
+    outcome = ingest_document(deps, "ml", b)
 
     assert outcome.items[0].is_new_page
     assert conn.execute("SELECT COUNT(*) AS n FROM wiki_pages").fetchone()["n"] == 2
@@ -261,26 +260,26 @@ class TwoConceptsClient(ScriptedClient):
         return "# Page\n\nA claim [1]. Another claim [2].\n"
 
 
-async def test_llm_judge_keeps_distinct_items_apart(make_deps, doc, conn):
+def test_llm_judge_keeps_distinct_items_apart(make_deps, doc, conn):
     a = doc("a.md", "Gradient descent minimises a loss.\n")
     b = doc("b.md", "Backpropagation computes gradients.\n")
     deps = _always_ask_llm(make_deps(TwoConceptsClient(ResolveDecision(matched_page_id=None, reason="different"))))
 
-    await ingest_document(deps, "ml", a)
-    outcome = await ingest_document(deps, "ml", b)
+    ingest_document(deps, "ml", a)
+    outcome = ingest_document(deps, "ml", b)
 
     assert deps.client.count("resolve") == 1, "the second item must consult the judge"
     assert outcome.items[0].is_new_page
     assert conn.execute("SELECT COUNT(*) AS n FROM wiki_pages").fetchone()["n"] == 2
 
 
-async def test_llm_judge_merges_when_it_returns_a_page_id(make_deps, doc, conn):
+def test_llm_judge_merges_when_it_returns_a_page_id(make_deps, doc, conn):
     a = doc("a.md", "Gradient descent minimises a loss.\n")
     b = doc("b.md", "Backpropagation computes gradients.\n")
     deps = _always_ask_llm(make_deps(TwoConceptsClient(ResolveDecision(matched_page_id=1, reason="same"))))
 
-    await ingest_document(deps, "ml", a)
-    outcome = await ingest_document(deps, "ml", b)
+    ingest_document(deps, "ml", a)
+    outcome = ingest_document(deps, "ml", b)
 
     assert not outcome.items[0].is_new_page
     assert outcome.items[0].reference_number == 2
@@ -291,14 +290,14 @@ async def test_llm_judge_merges_when_it_returns_a_page_id(make_deps, doc, conn):
     assert alias["type"] == "llm_sim"
 
 
-async def test_llm_low_confidence_match_flags_review(make_deps, doc, conn):
+def test_llm_low_confidence_match_flags_review(make_deps, doc, conn):
     a = doc("a.md", "Gradient descent minimises a loss.\n")
     b = doc("b.md", "Backpropagation computes gradients.\n")
     decision = ResolveDecision(matched_page_id=1, confidence="low", reason="maybe")
     deps = _always_ask_llm(make_deps(TwoConceptsClient(decision)))
 
-    await ingest_document(deps, "ml", a)
-    outcome = await ingest_document(deps, "ml", b)
+    ingest_document(deps, "ml", a)
+    outcome = ingest_document(deps, "ml", b)
 
     assert not outcome.items[0].is_new_page
     assert outcome.items[0].needs_review, "an uncertain merge must ask for a human check"
@@ -321,9 +320,9 @@ class TwoItemsSamePageClient(ScriptedClient):
         return "# Transformer\n\nFirst [1]. Second [1].\n"
 
 
-async def test_two_items_from_one_document_share_a_reference(make_deps, doc, conn):
+def test_two_items_from_one_document_share_a_reference(make_deps, doc, conn):
     path = doc("a.md", "About transformers, twice.\n")
-    outcome = await ingest_document(make_deps(TwoItemsSamePageClient()), "ml", path)
+    outcome = ingest_document(make_deps(TwoItemsSamePageClient()), "ml", path)
 
     assert conn.execute("SELECT COUNT(*) AS n FROM wiki_pages").fetchone()["n"] == 1
     assert conn.execute("SELECT COUNT(*) AS n FROM wiki_source").fetchone()["n"] == 1, (
@@ -337,8 +336,8 @@ class FailingItemClient(TransformerClient):
         raise RuntimeError("provider exploded")
 
 
-async def test_item_error_is_contained(make_deps, docs):
-    outcome = await ingest_document(make_deps(FailingItemClient()), "ml", docs[0])
+def test_item_error_is_contained(make_deps, docs):
+    outcome = ingest_document(make_deps(FailingItemClient()), "ml", docs[0])
 
     assert not outcome.ok
     assert outcome.items[0].error is not None
@@ -370,9 +369,9 @@ class SpuriousExtractionClient(TransformerClient):
         )
 
 
-async def test_extraction_review_drops_spurious_item(make_deps, docs, conn):
+def test_extraction_review_drops_spurious_item(make_deps, docs, conn):
     client = SpuriousExtractionClient()
-    outcome = await ingest_document(make_deps(client), "ml", docs[0])
+    outcome = ingest_document(make_deps(client), "ml", docs[0])
 
     assert client.count("extraction-refine") == 1
     assert [item.name for item in outcome.items] == ["Transformer"], "the spurious item is gone"
@@ -389,9 +388,9 @@ class UnrecoverableExtractionClient(TransformerClient):
         return ExtractionResult(items=self.extract_items(document_index))
 
 
-async def test_extraction_review_gives_up_after_retries(make_deps, docs, settings, conn):
+def test_extraction_review_gives_up_after_retries(make_deps, docs, settings, conn):
     client = UnrecoverableExtractionClient()
-    outcome = await ingest_document(make_deps(client), "ml", docs[0])
+    outcome = ingest_document(make_deps(client), "ml", docs[0])
 
     assert client.count("extraction-refine") == settings.review_retries
     assert outcome.ok, "a document that exhausts extraction review is still ingested"
@@ -399,17 +398,17 @@ async def test_extraction_review_gives_up_after_retries(make_deps, docs, setting
 
 
 class ExtractionFailsClient(TransformerClient):
-    async def run_json(self, prompt, schema, *, label="step"):
+    def run_json(self, prompt, schema, *, label="step"):
         if label == "extract":
             raise RuntimeError("provider exploded during extraction")
-        return await super().run_json(prompt, schema, label=label)
+        return super().run_json(prompt, schema, label=label)
 
 
-async def test_document_failing_extraction_can_be_retried(make_deps, docs, conn):
+def test_document_failing_extraction_can_be_retried(make_deps, docs, conn):
     """A document that never got extracted must not look already-ingested."""
-    await ingest_document(make_deps(ExtractionFailsClient()), "ml", docs[0])
+    ingest_document(make_deps(ExtractionFailsClient()), "ml", docs[0])
     assert conn.execute("SELECT COUNT(*) AS n FROM source").fetchone()["n"] == 0
 
-    outcome = await ingest_document(make_deps(TransformerClient()), "ml", docs[0])
+    outcome = ingest_document(make_deps(TransformerClient()), "ml", docs[0])
     assert not outcome.skipped, "the failed document must be retried, not skipped"
     assert outcome.ok

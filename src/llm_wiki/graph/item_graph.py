@@ -35,7 +35,7 @@ def build_item_graph(deps: Deps):
             seen.setdefault(candidate.page_id, candidate)
         return list(seen.values())[: settings.resolve_candidate_limit]
 
-    async def resolve_entity(state: ItemState) -> ItemState:
+    def resolve_entity(state: ItemState) -> ItemState:
         """Find the page this item belongs to.
 
         A funnel: an exact alias hit, then — for everything else — candidates from
@@ -82,7 +82,7 @@ def build_item_graph(deps: Deps):
             return {"is_new_page": True, "page_name": item.name}
 
         # (3) Let the LLM judge against name, aliases and description.
-        decision = await deps.client.run_json(
+        decision = deps.client.run_json(
             prompts.resolve_entity(item, candidates), ResolveDecision, label="resolve"
         )
         chosen = next(
@@ -128,7 +128,7 @@ def build_item_graph(deps: Deps):
                 deps.conn, namespace=namespace, name=alias, page_id=page_id, type_="alias"
             )
 
-    async def create_page(state: ItemState) -> ItemState:
+    def create_page(state: ItemState) -> ItemState:
         """Insert the page and its first reference, then write its body."""
         item = state["item"]
         namespace = state["namespace"]
@@ -149,7 +149,7 @@ def build_item_graph(deps: Deps):
                 deps.conn, wiki_id=page_id, source_id=state["source_id"], namespace=namespace
             )
 
-        body = await deps.client.run_text(
+        body = deps.client.run_text(
             prompts.create_page(item, reference_number), label="create-page"
         )
         return {
@@ -160,7 +160,7 @@ def build_item_graph(deps: Deps):
             "body": pages.strip_references(body),
         }
 
-    async def merge_page(state: ItemState) -> ItemState:
+    def merge_page(state: ItemState) -> ItemState:
         """Link the new source to an existing page and integrate the material."""
         item = state["item"]
         namespace = state["namespace"]
@@ -184,7 +184,7 @@ def build_item_graph(deps: Deps):
         # programmatically and re-requested with the specific loss named.
         for attempt in range(settings.review_retries + 1):
             merged = pages.strip_references(
-                await deps.client.run_text(prompt, label=f"merge-page#{attempt}")
+                deps.client.run_text(prompt, label=f"merge-page#{attempt}")
             )
             problems = pages.validate_merge(existing_body, merged)
             if not problems:
@@ -206,8 +206,8 @@ def build_item_graph(deps: Deps):
             "page_issues": problems,
         }
 
-    async def review_page(state: ItemState) -> ItemState:
-        review = await deps.client.run_json(
+    def review_page(state: ItemState) -> ItemState:
+        review = deps.client.run_json(
             prompts.review_page(state["page_name"], state["body"]), Review, label="page-review"
         )
         if review.verdict == "pass":
@@ -215,8 +215,8 @@ def build_item_graph(deps: Deps):
         log.info("page review failed for %r: %s", state["page_name"], review.issues)
         return {"page_issues": review.issues}
 
-    async def refine_page(state: ItemState) -> ItemState:
-        body = await deps.client.run_text(
+    def refine_page(state: ItemState) -> ItemState:
+        body = deps.client.run_text(
             prompts.refine_page(state["body"], state["page_issues"]), label="page-refine"
         )
         return {
@@ -224,7 +224,7 @@ def build_item_graph(deps: Deps):
             "page_attempts": state.get("page_attempts", 0) + 1,
         }
 
-    async def persist(state: ItemState) -> ItemState:
+    def persist(state: ItemState) -> ItemState:
         """Write the page and refresh the namespace index."""
         namespace = state["namespace"]
         needs_review = bool(state.get("needs_review"))
@@ -259,7 +259,7 @@ def build_item_graph(deps: Deps):
             return "give_up"
         return "refine"
 
-    async def flag_page(state: ItemState) -> ItemState:
+    def flag_page(state: ItemState) -> ItemState:
         return {"needs_review": True}
 
     graph = StateGraph(ItemState)

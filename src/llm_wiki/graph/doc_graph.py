@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 def build_doc_graph(deps: Deps):
     """Compile the stage-1 graph."""
 
-    async def load_document(state: DocState) -> DocState:
+    def load_document(state: DocState) -> DocState:
         document = loaders.load(Path(state["path"]))
         return {
             "filename": document.path.name,
@@ -29,7 +29,7 @@ def build_doc_graph(deps: Deps):
             "timestamp": document.timestamp,
         }
 
-    async def check_sha(state: DocState) -> DocState:
+    def check_sha(state: DocState) -> DocState:
         """Skip documents already ingested into this namespace."""
         existing = repo.find_source_by_sha(deps.conn, state["namespace"], state["sha256"])
         if existing is not None:
@@ -41,8 +41,8 @@ def build_doc_graph(deps: Deps):
             }
         return {"skipped": False}
 
-    async def extract(state: DocState) -> DocState:
-        result = await deps.client.run_json(
+    def extract(state: DocState) -> DocState:
+        result = deps.client.run_json(
             prompts.extract(state["filename"], state["text"]),
             ExtractionResult,
             label="extract",
@@ -50,9 +50,9 @@ def build_doc_graph(deps: Deps):
         log.info("extracted %d item(s) from %s", len(result.items), state["filename"])
         return {"items": result.items}
 
-    async def review_extraction(state: DocState) -> DocState:
+    def review_extraction(state: DocState) -> DocState:
         """Check the whole item set against the source: recall, precision, type."""
-        review = await deps.client.run_json(
+        review = deps.client.run_json(
             prompts.review_extraction(state["filename"], state["text"], state["items"]),
             Review,
             label="extraction-review",
@@ -62,9 +62,9 @@ def build_doc_graph(deps: Deps):
         log.info("extraction review failed for %s: %s", state["filename"], review.issues)
         return {"extraction_issues": review.issues}
 
-    async def refine_extraction(state: DocState) -> DocState:
+    def refine_extraction(state: DocState) -> DocState:
         """Rebuild the item set from the source, adding, dropping, and fixing."""
-        result = await deps.client.run_json(
+        result = deps.client.run_json(
             prompts.refine_extraction(
                 state["filename"],
                 state["text"],
@@ -80,7 +80,7 @@ def build_doc_graph(deps: Deps):
             "extraction_attempts": state.get("extraction_attempts", 0) + 1,
         }
 
-    async def record_source(state: DocState) -> DocState:
+    def record_source(state: DocState) -> DocState:
         # The source row is recorded only once extraction has succeeded and been
         # reviewed. Writing it earlier would mean a document that failed
         # mid-pipeline is treated as already ingested on the next run, and could

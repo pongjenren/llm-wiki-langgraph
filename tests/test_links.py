@@ -30,11 +30,11 @@ class ApproveAllLinkClient:
             for pid, name in _CANDIDATE.findall(prompt)
         ]
 
-    async def run_json(self, prompt: str, schema, *, label: str = "step") -> LinkDecision:
+    def run_json(self, prompt: str, schema, *, label: str = "step") -> LinkDecision:
         self.prompts.append(prompt)
         return LinkDecision(links=self._links(prompt))
 
-    async def run_text(self, prompt: str, *, label: str = "step") -> str:
+    def run_text(self, prompt: str, *, label: str = "step") -> str:
         raise AssertionError("linking must not call run_text")
 
 
@@ -45,7 +45,7 @@ class FixedDecisionClient(ApproveAllLinkClient):
         super().__init__()
         self._decision = decision
 
-    async def run_json(self, prompt: str, schema, *, label: str = "step") -> LinkDecision:
+    def run_json(self, prompt: str, schema, *, label: str = "step") -> LinkDecision:
         self.prompts.append(prompt)
         return self._decision
 
@@ -64,9 +64,9 @@ def _body(settings, name: str) -> str:
     return pages.read_page(settings.wiki_dir, NS, name)
 
 
-async def _all(conn, settings, *, client=None, dry_run: bool = False, source_siblings=None):
+def _all(conn, settings, *, client=None, dry_run: bool = False, source_siblings=None):
     ids = [row["page_id"] for row in repo.list_pages(conn, NS)]
-    return await links.link_pages(
+    return links.link_pages(
         conn,
         wiki_dir=settings.wiki_dir,
         namespace=NS,
@@ -77,7 +77,7 @@ async def _all(conn, settings, *, client=None, dry_run: bool = False, source_sib
     )
 
 
-async def test_links_first_mention_only(conn, settings):
+def test_links_first_mention_only(conn, settings):
     _page(conn, settings, "Transformer", "# Transformer\n\nA model.\n")
     _page(conn, settings, "attention mechanisms", "# attention mechanisms\n\nA concept.\n")
     src = _page(
@@ -87,7 +87,7 @@ async def test_links_first_mention_only(conn, settings):
         "# Encoder\n\nAn Encoder feeds a Transformer. A Transformer uses attention mechanisms.\n",
     )
 
-    await _all(conn, settings)
+    _all(conn, settings)
     body = _body(settings, "Encoder")
 
     assert body.count("[Transformer](Transformer.md)") == 1
@@ -99,7 +99,7 @@ async def test_links_first_mention_only(conn, settings):
     assert out == {"Transformer", "attention mechanisms"}
 
 
-async def test_longest_alias_wins(conn, settings):
+def test_longest_alias_wins(conn, settings):
     _page(conn, settings, "Transformer", "# Transformer\n\nx\n")
     long_id = _page(
         conn, settings, "Transformer (machine learning model)", "# T\n\nx\n"
@@ -111,7 +111,7 @@ async def test_longest_alias_wins(conn, settings):
         "# Survey\n\nThe Transformer (machine learning model) changed everything.\n",
     )
 
-    await _all(conn, settings)
+    _all(conn, settings)
     body = _body(settings, "Survey")
 
     # The full name is linked as one anchor; no nested short "Transformer" link.
@@ -120,17 +120,17 @@ async def test_longest_alias_wins(conn, settings):
     assert out == {long_id}
 
 
-async def test_never_links_to_itself(conn, settings):
+def test_never_links_to_itself(conn, settings):
     _page(conn, settings, "Transformer", "# Transformer\n\nThe Transformer is a Transformer.\n")
 
-    await _all(conn, settings)
+    _all(conn, settings)
     body = _body(settings, "Transformer")
 
     assert "](Transformer.md)" not in body
     assert repo.list_outgoing_links(conn, repo.list_pages(conn, NS)[0]["page_id"]) == []
 
 
-async def test_skips_code_headings_and_existing_links(conn, settings):
+def test_skips_code_headings_and_existing_links(conn, settings):
     _page(conn, settings, "Transformer", "# Transformer\n\nx\n")
     src = _page(
         conn,
@@ -143,7 +143,7 @@ async def test_skips_code_headings_and_existing_links(conn, settings):
         "But a plain Transformer here.\n",
     )
 
-    await _all(conn, settings)
+    _all(conn, settings)
     body = _body(settings, "Notes")
 
     # Only the last, plain occurrence is linked.
@@ -155,14 +155,14 @@ async def test_skips_code_headings_and_existing_links(conn, settings):
     assert len(repo.list_outgoing_links(conn, src)) == 1
 
 
-async def test_relinking_is_idempotent(conn, settings):
+def test_relinking_is_idempotent(conn, settings):
     _page(conn, settings, "Transformer", "# Transformer\n\nx\n")
     _page(conn, settings, "Decoder", "# Decoder\n\nA Decoder mirrors a Transformer.\n")
 
-    first = await _all(conn, settings)
+    first = _all(conn, settings)
     body_after_first = _body(settings, "Decoder")
 
-    second = await _all(conn, settings)
+    second = _all(conn, settings)
     body_after_second = _body(settings, "Decoder")
 
     assert body_after_first == body_after_second
@@ -171,12 +171,12 @@ async def test_relinking_is_idempotent(conn, settings):
     assert all(not r.changed for r in second)
 
 
-async def test_incremental_scope_leaves_untouched_pages_alone(conn, settings):
+def test_incremental_scope_leaves_untouched_pages_alone(conn, settings):
     a = _page(conn, settings, "Alpha", "# Alpha\n\nAlpha references Beta.\n")
     b = _page(conn, settings, "Beta", "# Beta\n\nBeta references Alpha.\n")
 
     # Link only Alpha: Beta must not be rewritten even though it mentions Alpha.
-    await links.link_pages(
+    links.link_pages(
         conn, wiki_dir=settings.wiki_dir, namespace=NS, page_ids=[a], client=ApproveAllLinkClient()
     )
     assert "[Beta](Beta.md)" in _body(settings, "Alpha")
@@ -184,12 +184,12 @@ async def test_incremental_scope_leaves_untouched_pages_alone(conn, settings):
     assert repo.list_outgoing_links(conn, b) == []
 
     # A full reconcile backfills the Beta -> Alpha link.
-    await _all(conn, settings)
+    _all(conn, settings)
     assert "[Alpha](Alpha.md)" in _body(settings, "Beta")
     assert {row["page_name"] for row in repo.list_backlinks(conn, a)} == {"Beta"}
 
 
-async def test_matches_are_case_and_alias_insensitive(conn, settings):
+def test_matches_are_case_and_alias_insensitive(conn, settings):
     _page(conn, settings, "Transformer", "# Transformer\n\nx\n", aliases=["transformer model"])
     src = _page(
         conn,
@@ -198,7 +198,7 @@ async def test_matches_are_case_and_alias_insensitive(conn, settings):
         "# Ref\n\nA TRANSFORMER and a transformer model both count.\n",
     )
 
-    await _all(conn, settings)
+    _all(conn, settings)
     body = _body(settings, "Ref")
 
     # Case-insensitive match keeps the original surface text as the anchor.
@@ -207,37 +207,37 @@ async def test_matches_are_case_and_alias_insensitive(conn, settings):
     assert len(repo.list_outgoing_links(conn, src)) == 1
 
 
-async def test_llm_can_reject_a_candidate(conn, settings):
+def test_llm_can_reject_a_candidate(conn, settings):
     """An alias match is only a candidate now; the judge may decline to link it."""
     _page(conn, settings, "Transformer", "# Transformer\n\nx\n")
     src = _page(conn, settings, "Doc", "# Doc\n\nA Transformer appears.\n")
 
     # The judge returns no links even though "Transformer" matches an alias.
-    await _all(conn, settings, client=FixedDecisionClient(LinkDecision(links=[])))
+    _all(conn, settings, client=FixedDecisionClient(LinkDecision(links=[])))
 
     assert "](Transformer.md)" not in _body(settings, "Doc")
     assert repo.list_outgoing_links(conn, src) == []
 
 
-async def test_unreal_target_is_dropped_without_llm(conn, settings):
+def test_unreal_target_is_dropped_without_llm(conn, settings):
     """A page_id the judge invents is verified away, not written."""
     _page(conn, settings, "Transformer", "# Transformer\n\nx\n")
     src = _page(conn, settings, "Doc", "# Doc\n\nA Transformer appears.\n")
 
     bogus = LinkDecision(links=[ProposedLink(target_page_id=999999, anchor_text="Transformer")])
-    await _all(conn, settings, client=FixedDecisionClient(bogus))
+    _all(conn, settings, client=FixedDecisionClient(bogus))
 
     assert "](Transformer.md)" not in _body(settings, "Doc")
     assert repo.list_outgoing_links(conn, src) == []
 
 
-async def test_source_siblings_are_offered_as_candidates(conn, settings):
+def test_source_siblings_are_offered_as_candidates(conn, settings):
     """Pages sharing a source are handed to the judge flagged as same-source."""
     t = _page(conn, settings, "Transformer", "# Transformer\n\nx\n")
     src = _page(conn, settings, "Encoder", "# Encoder\n\nAn Encoder feeds a Transformer.\n")
 
     client = ApproveAllLinkClient()
-    await links.link_pages(
+    links.link_pages(
         conn,
         wiki_dir=settings.wiki_dir,
         namespace=NS,
@@ -268,7 +268,7 @@ def test_sentence_span_stays_within_paragraph():
     assert span == "Second has the Widget inside."
 
 
-async def test_context_sentence_is_stored(conn, settings):
+def test_context_sentence_is_stored(conn, settings):
     _page(conn, settings, "Transformer", "# Transformer\n\nx\n")
     src = _page(
         conn,
@@ -277,7 +277,7 @@ async def test_context_sentence_is_stored(conn, settings):
         "# Encoder\n\nAn Encoder feeds a Transformer. A Transformer uses attention.\n",
     )
 
-    await _all(conn, settings)
+    _all(conn, settings)
 
     row = next(
         r for r in repo.list_outgoing_links(conn, src) if r["page_name"] == "Transformer"
@@ -287,11 +287,11 @@ async def test_context_sentence_is_stored(conn, settings):
     assert row["context_sentence"] == "An Encoder feeds a Transformer."
 
 
-async def test_dry_run_reports_without_writing(conn, settings):
+def test_dry_run_reports_without_writing(conn, settings):
     _page(conn, settings, "Transformer", "# Transformer\n\nx\n")
     src = _page(conn, settings, "Doc", "# Doc\n\nA Transformer appears.\n")
 
-    results = await _all(conn, settings, dry_run=True)
+    results = _all(conn, settings, dry_run=True)
 
     assert any(r.changed for r in results)
     assert "](Transformer.md)" not in _body(settings, "Doc")  # file untouched

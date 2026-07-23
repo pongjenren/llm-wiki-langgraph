@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import shutil
 import time
@@ -61,7 +60,7 @@ def _resolve_targets(path: Optional[Path], namespace: Optional[str]) -> list[tup
     return [(namespace, path)]
 
 
-async def _link_touched_pages(conn, client, outcomes: list[DocumentOutcome]) -> None:
+def _link_touched_pages(conn, client, outcomes: list[DocumentOutcome]) -> None:
     """Relink the pages this run created or merged into.
 
     Incremental by design: only pages touched here are rescanned, so they link
@@ -87,7 +86,7 @@ async def _link_touched_pages(conn, client, outcomes: list[DocumentOutcome]) -> 
 
     for namespace, siblings in touched.items():
         try:
-            await links.link_pages(
+            links.link_pages(
                 conn,
                 wiki_dir=settings.wiki_dir,
                 namespace=namespace,
@@ -168,25 +167,25 @@ def ingest(
 
     typer.echo(f"Ingesting {len(targets)} document(s) into {settings.wiki_dir}\n")
 
-    async def run() -> int:
+    def run() -> int:
         conn = connect(settings.db_url)
         try:
             init_db(conn)
             start = time.monotonic()
             client = LLMClient()
             deps = Deps(conn=conn, client=client, settings=settings)
-            outcomes = await ingest_documents(deps, targets)
+            outcomes = ingest_documents(deps, targets)
             elapsed = time.monotonic() - start
             try:
                 telemetry.record_run(conn, outcomes, elapsed)
             except Exception as exc:  # telemetry must never fail an ingest
                 log.warning("failed to record ingest telemetry: %s", exc)
-            await _link_touched_pages(conn, client, outcomes)
+            _link_touched_pages(conn, client, outcomes)
             return _report(outcomes)
         finally:
             conn.close()
 
-    raise typer.Exit(code=asyncio.run(run()))
+    raise typer.Exit(code=run())
 
 
 @app.command()
@@ -296,7 +295,7 @@ def link(
         )
         raise typer.Exit(code=2)
 
-    async def run() -> None:
+    def run() -> None:
         conn = connect(settings.db_url)
         try:
             init_db(conn)
@@ -318,7 +317,7 @@ def link(
             total_changed = 0
             for ns in namespaces:
                 page_ids = [row["page_id"] for row in repo.list_pages(conn, ns)]
-                results = await links.link_pages(
+                results = links.link_pages(
                     conn,
                     wiki_dir=settings.wiki_dir,
                     namespace=ns,
@@ -344,7 +343,7 @@ def link(
         finally:
             conn.close()
 
-    asyncio.run(run())
+    run()
 
 
 @app.command()

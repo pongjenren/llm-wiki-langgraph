@@ -15,7 +15,7 @@ import re
 from typing import Any, TypeVar
 
 import json_repair
-from openai import AsyncOpenAI, OpenAIError
+from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, ValidationError
 
 from llm_wiki.config import settings
@@ -57,10 +57,10 @@ def _extract_json(text: str) -> Any:
         return repaired
 
 
-async def query_LLM(
+def query_LLM(
     prompt: str,
     *,
-    client: AsyncOpenAI,
+    client: OpenAI,
     model: str,
     temperature: float,
     max_tokens: int,
@@ -72,7 +72,7 @@ async def query_LLM(
     single-message request with no shared conversation state.
     """
     try:
-        response = await client.chat.completions.create(
+        response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=temperature,
@@ -88,9 +88,9 @@ async def query_LLM(
 
 
 class LLMClient:
-    """Async client over OpenRouter's chat/completions API.
+    """Client over OpenRouter's chat/completions API.
 
-    Holds one `AsyncOpenAI` instance (and its connection pool) for reuse across
+    Holds one `OpenAI` instance (and its connection pool) for reuse across
     pipeline steps. `run_json` and `run_text` are the interface the graph nodes
     depend on; tests swap this object out wholesale.
     """
@@ -107,13 +107,13 @@ class LLMClient:
         self._temperature = settings.temperature if temperature is None else temperature
         self._max_tokens = settings.max_tokens if max_tokens is None else max_tokens
         self._retries = settings.json_retries if retries is None else retries
-        self._client = AsyncOpenAI(
+        self._client = OpenAI(
             base_url=OPENROUTER_BASE_URL,
             api_key=settings.openrouter_api_key,
         )
 
-    async def run_text(self, prompt: str, *, label: str = "step") -> str:
-        return await query_LLM(
+    def run_text(self, prompt: str, *, label: str = "step") -> str:
+        return query_LLM(
             prompt,
             client=self._client,
             model=self._model,
@@ -122,7 +122,7 @@ class LLMClient:
             label=label,
         )
 
-    async def run_json(self, prompt: str, schema: type[T], *, label: str = "step") -> T:
+    def run_json(self, prompt: str, schema: type[T], *, label: str = "step") -> T:
         """Run a prompt and parse the reply into `schema`, retrying on invalid output."""
         request = f"{prompt}\n\n{_JSON_INSTRUCTIONS.format(schema=json.dumps(schema.model_json_schema(), indent=2))}"
         last_error: str | None = None
@@ -135,7 +135,7 @@ class LLMClient:
                     "Return corrected JSON only."
                 )
 
-            raw = await self.run_text(request, label=f"{label}#{attempt}")
+            raw = self.run_text(request, label=f"{label}#{attempt}")
             try:
                 return schema.model_validate(_extract_json(raw))
             except (ValueError, ValidationError) as exc:

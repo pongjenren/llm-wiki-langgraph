@@ -59,7 +59,7 @@ class ScriptedClient:
         raise AssertionError("unexpected page refinement")
 
     # -- LLMClient interface -----------------------------------------------
-    async def run_json(self, prompt: str, schema, *, label: str = "step"):
+    def run_json(self, prompt: str, schema, *, label: str = "step"):
         self.calls.append(label)
         if label == "extract":
             self.documents_seen += 1
@@ -74,7 +74,7 @@ class ScriptedClient:
             return self.resolve()
         raise AssertionError(f"unscripted run_json label: {label}")
 
-    async def run_text(self, prompt: str, *, label: str = "step") -> str:
+    def run_text(self, prompt: str, *, label: str = "step") -> str:
         self.calls.append(label)
         if label == "create-page":
             return self.create_page()

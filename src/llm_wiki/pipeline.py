@@ -40,7 +40,7 @@ class DocumentOutcome:
         return self.error is None and all(item.error is None for item in self.items)
 
 
-async def ingest_document(deps: Deps, namespace: str, path: Path) -> DocumentOutcome:
+def ingest_document(deps: Deps, namespace: str, path: Path) -> DocumentOutcome:
     """Run a single document through both stages."""
     doc_graph = build_doc_graph(deps)
     item_graph = build_item_graph(deps)
@@ -49,7 +49,7 @@ async def ingest_document(deps: Deps, namespace: str, path: Path) -> DocumentOut
 
     try:
         try:
-            doc_state = await doc_graph.ainvoke({"namespace": namespace, "path": str(path)})
+            doc_state = doc_graph.invoke({"namespace": namespace, "path": str(path)})
         except Exception as exc:  # a bad document must not abort the whole run
             log.error("failed to process %s: %s", path, exc)
             log.debug("traceback for %s", path, exc_info=True)
@@ -66,7 +66,7 @@ async def ingest_document(deps: Deps, namespace: str, path: Path) -> DocumentOut
         # Serial by design: concurrent items would race to create the same page.
         for item in doc_state.get("items", []):
             try:
-                item_state = await item_graph.ainvoke(
+                item_state = item_graph.invoke(
                     {
                         "namespace": namespace,
                         "source_id": doc_state["source_id"],
@@ -107,5 +107,5 @@ async def ingest_document(deps: Deps, namespace: str, path: Path) -> DocumentOut
         outcome.elapsed_seconds = time.monotonic() - start
 
 
-async def ingest_documents(deps: Deps, targets: list[tuple[str, Path]]) -> list[DocumentOutcome]:
-    return [await ingest_document(deps, namespace, path) for namespace, path in targets]
+def ingest_documents(deps: Deps, targets: list[tuple[str, Path]]) -> list[DocumentOutcome]:
+    return [ingest_document(deps, namespace, path) for namespace, path in targets]
