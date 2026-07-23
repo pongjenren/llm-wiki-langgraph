@@ -14,18 +14,15 @@ compiled code via `uv run llm-wiki graph`.
 
 ```
 raw file → load → SHA256 check ─┬─ already ingested → stop
-                                └─ new → summarize? ─┬─ yes → summarize ─┐
-                                                     └─ no ──────────────┴→ extract
-                                                                             ↓
-                                            review extraction ─fail→ refine ─┐
-                                                   │  ↑──────────────────────┘
-                                                   pass → record source → items
+                                └─ new → extract
+                                            ↓
+                           review extraction ─fail→ refine ─┐
+                                  │  ↑──────────────────────┘
+                                  pass → record source → items
 ```
 
 The SHA is taken over the file's raw bytes, so re-running never reprocesses an
-unchanged document. Whether to summarize is the model's call: a spreadsheet or
-log gets rewritten into descriptive prose first, while text that is already prose
-goes straight to extraction. Extraction quality is settled here, against the
+unchanged document. Extraction quality is settled here, against the
 source: `review_extraction` checks the whole item list for recall, precision,
 type, and aliases, and `refine_extraction` rebuilds it — adding missing items,
 **dropping** spurious ones, and fixing the rest. The source row is written only

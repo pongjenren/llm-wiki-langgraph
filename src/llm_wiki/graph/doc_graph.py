@@ -1,4 +1,4 @@
-"""Stage 1: raw file -> SHA dedup -> optional summarize -> entity/concept list."""
+"""Stage 1: raw file -> SHA dedup -> entity/concept list."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from llm_wiki.db import repo
 from llm_wiki.db.connection import transaction
 from llm_wiki.graph.state import Deps, DocState
 from llm_wiki.llm import prompts
-from llm_wiki.llm.schemas import ExtractionResult, Review, SummarizeDecision
+from llm_wiki.llm.schemas import ExtractionResult, Review
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +27,6 @@ def build_doc_graph(deps: Deps):
             "text": document.text,
             "sha256": document.sha256,
             "timestamp": document.timestamp,
-            "working_text": document.text,
         }
 
     async def check_sha(state: DocState) -> DocState:
@@ -42,29 +41,9 @@ def build_doc_graph(deps: Deps):
             }
         return {"skipped": False}
 
-    async def decide_summarize(state: DocState) -> DocState:
-        decision = await deps.client.run_json(
-            prompts.summarize_decision(state["filename"], state["text"]),
-            SummarizeDecision,
-            label="summarize-decision",
-        )
-        log.info(
-            "summarize %s: %s (%s)",
-            state["filename"],
-            decision.should_summarize,
-            decision.reason,
-        )
-        return {"summarized": decision.should_summarize}
-
-    async def summarize(state: DocState) -> DocState:
-        text = await deps.client.run_text(
-            prompts.summarize(state["filename"], state["text"]), label="summarize"
-        )
-        return {"working_text": text}
-
     async def extract(state: DocState) -> DocState:
         result = await deps.client.run_json(
-            prompts.extract(state["filename"], state["working_text"]),
+            prompts.extract(state["filename"], state["text"]),
             ExtractionResult,
             label="extract",
         )
@@ -74,7 +53,7 @@ def build_doc_graph(deps: Deps):
     async def review_extraction(state: DocState) -> DocState:
         """Check the whole item set against the source: recall, precision, type."""
         review = await deps.client.run_json(
-            prompts.review_extraction(state["filename"], state["working_text"], state["items"]),
+            prompts.review_extraction(state["filename"], state["text"], state["items"]),
             Review,
             label="extraction-review",
         )
@@ -88,7 +67,7 @@ def build_doc_graph(deps: Deps):
         result = await deps.client.run_json(
             prompts.refine_extraction(
                 state["filename"],
-                state["working_text"],
+                state["text"],
                 state["items"],
                 state["extraction_issues"],
             ),
@@ -119,9 +98,6 @@ def build_doc_graph(deps: Deps):
     def after_sha_check(state: DocState) -> str:
         return "skip" if state.get("skipped") else "continue"
 
-    def after_summarize_decision(state: DocState) -> str:
-        return "summarize" if state.get("summarized") else "extract"
-
     def after_extraction_review(state: DocState) -> str:
         if not state.get("extraction_issues"):
             return "accept"
@@ -137,8 +113,6 @@ def build_doc_graph(deps: Deps):
     graph = StateGraph(DocState)
     graph.add_node("load_document", load_document)
     graph.add_node("check_sha", check_sha)
-    graph.add_node("decide_summarize", decide_summarize)
-    graph.add_node("summarize", summarize)
     graph.add_node("extract", extract)
     graph.add_node("review_extraction", review_extraction)
     graph.add_node("refine_extraction", refine_extraction)
@@ -147,12 +121,8 @@ def build_doc_graph(deps: Deps):
     graph.add_edge(START, "load_document")
     graph.add_edge("load_document", "check_sha")
     graph.add_conditional_edges(
-        "check_sha", after_sha_check, {"skip": END, "continue": "decide_summarize"}
+        "check_sha", after_sha_check, {"skip": END, "continue": "extract"}
     )
-    graph.add_conditional_edges(
-        "decide_summarize", after_summarize_decision, {"summarize": "summarize", "extract": "extract"}
-    )
-    graph.add_edge("summarize", "extract")
     graph.add_edge("extract", "review_extraction")
     graph.add_conditional_edges(
         "review_extraction",

@@ -2,8 +2,7 @@
 
 Loaders turn a file into deterministic text. This is deliberately kept out of
 the LLM's hands: the SHA256 dedup check is only meaningful if the same bytes
-always produce the same text, so extraction must be reproducible. Interpreting
-that text (e.g. narrating a spreadsheet) is the summarize node's job.
+always produce the same text, so extraction must be reproducible.
 """
 
 from __future__ import annotations

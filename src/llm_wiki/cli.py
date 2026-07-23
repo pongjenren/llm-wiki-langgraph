@@ -98,8 +98,7 @@ def _report(outcomes: list[DocumentOutcome]) -> int:
             typer.secho(f"– {outcome.path}: {outcome.skip_reason}", fg=typer.colors.BRIGHT_BLACK)
             continue
 
-        note = " (summarized)" if outcome.summarized else ""
-        typer.secho(f"✓ {outcome.path}{note}", fg=typer.colors.GREEN)
+        typer.secho(f"✓ {outcome.path}", fg=typer.colors.GREEN)
         for item in outcome.items:
             if item.error:
                 failed += 1

@@ -16,7 +16,6 @@ from llm_wiki.llm.schemas import (
     ExtractionResult,
     ResolveDecision,
     Review,
-    SummarizeDecision,
 )
 
 
@@ -60,8 +59,6 @@ class ScriptedClient:
     # -- LLMClient interface -----------------------------------------------
     async def run_json(self, prompt: str, schema, *, label: str = "step"):
         self.calls.append(label)
-        if label == "summarize-decision":
-            return SummarizeDecision(should_summarize=False, reason="already prose")
         if label == "extract":
             self.documents_seen += 1
             return ExtractionResult(items=self.extract_items(self.documents_seen))

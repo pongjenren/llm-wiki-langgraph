@@ -10,13 +10,6 @@ PageType = Literal["entity", "concept"]
 Verdict = Literal["pass", "fail"]
 
 
-class SummarizeDecision(BaseModel):
-    """Whether a raw document should be rewritten before entity extraction."""
-
-    should_summarize: bool
-    reason: str = Field(description="One sentence explaining the decision.")
-
-
 class ExtractedItem(BaseModel):
     """One entity or concept found in a document."""
 

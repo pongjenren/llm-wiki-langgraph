@@ -17,48 +17,6 @@ if TYPE_CHECKING:
     from llm_wiki.db.repo import PageCandidate
 
 
-def summarize_decision(filename: str, text: str) -> str:
-    return f"""
-You are triaging a document before entity extraction.
-
-Decide whether it should first be rewritten into descriptive prose. Rewrite when
-the raw form is not self-describing — for example a spreadsheet, a table dump, a
-log, or structured records — where facts are implied by structure rather than
-stated in sentences. Documents that are already prose do not need rewriting.
-
-Filename: {filename}
-
-Document:
----
-{text}
----
-""".strip()
-
-
-def summarize(filename: str, text: str) -> str:
-    return f"""
-Rewrite the following document as descriptive prose suitable for knowledge
-extraction.
-
-Rules:
-- State only facts present in the document. Do not infer, estimate, or add
-  outside knowledge.
-- Make implicit structure explicit: name the entities the rows and columns refer
-  to, and describe the quantities and relationships they encode.
-- Preserve specific values, names, dates and units exactly.
-- Do not editorialize or draw conclusions.
-
-Filename: {filename}
-
-Document:
----
-{text}
----
-
-Reply with the rewritten prose only.
-""".strip()
-
-
 def extract(filename: str, text: str) -> str:
     return f"""
 Extract the entities and concepts this document supports a wiki page about.

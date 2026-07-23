@@ -30,7 +30,6 @@ class DocumentOutcome:
     namespace: str
     skipped: bool = False
     skip_reason: str | None = None
-    summarized: bool = False
     source_id: int | None = None
     items: list[ItemOutcome] = field(default_factory=list)
     error: str | None = None
@@ -58,7 +57,6 @@ async def ingest_document(deps: Deps, namespace: str, path: Path) -> DocumentOut
             return outcome
 
         outcome.source_id = doc_state.get("source_id")
-        outcome.summarized = bool(doc_state.get("summarized"))
 
         if doc_state.get("skipped"):
             outcome.skipped = True

@@ -49,8 +49,6 @@ class DocState(TypedDict, total=False):
     skip_reason: str
 
     # Processing
-    summarized: bool
-    working_text: str
     items: list[ExtractedItem]
 
     # Extraction review loop

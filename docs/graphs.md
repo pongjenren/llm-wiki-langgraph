@@ -33,8 +33,6 @@ graph TD;
 	__start__([<p>__start__</p>]):::first
 	load_document(load_document)
 	check_sha(check_sha)
-	decide_summarize(decide_summarize)
-	summarize(summarize)
 	extract(extract)
 	review_extraction(review_extraction)
 	refine_extraction(refine_extraction)
@@ -42,15 +40,12 @@ graph TD;
 	__end__([<p>__end__</p>]):::last
 	__start__ --> load_document;
 	check_sha -. &nbsp;skip&nbsp; .-> __end__;
-	check_sha -. &nbsp;continue&nbsp; .-> decide_summarize;
-	decide_summarize -.-> extract;
-	decide_summarize -.-> summarize;
+	check_sha -. &nbsp;continue&nbsp; .-> extract;
 	extract --> review_extraction;
 	load_document --> check_sha;
 	refine_extraction --> review_extraction;
 	review_extraction -. &nbsp;accept&nbsp; .-> record_source;
 	review_extraction -. &nbsp;refine&nbsp; .-> refine_extraction;
-	summarize --> extract;
 	record_source --> __end__;
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0
