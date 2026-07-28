@@ -55,8 +55,8 @@ class ScriptedClient:
     def merge_page(self, attempt: int) -> str:
         return "# Page\n\nA claim [1]. Another claim [2].\n"
 
-    def refine_page(self) -> str:
-        raise AssertionError("unexpected page refinement")
+    def refine_create_page(self) -> str:
+        raise AssertionError("unexpected create-page refinement")
 
     # -- LLMClient interface -----------------------------------------------
     def run_json(self, prompt: str, schema, *, label: str = "step"):
@@ -68,7 +68,7 @@ class ScriptedClient:
             return self.extraction_review()
         if label == "extraction-refine":
             return self.extraction_refine(self.documents_seen)
-        if label == "page-review":
+        if label in ("create-review", "merge-review"):
             return self.page_review()
         if label == "resolve":
             return self.resolve()
@@ -80,8 +80,8 @@ class ScriptedClient:
             return self.create_page()
         if label.startswith("merge-page"):
             return self.merge_page(int(label.rsplit("#", 1)[1]))
-        if label == "page-refine":
-            return self.refine_page()
+        if label == "create-refine":
+            return self.refine_create_page()
         raise AssertionError(f"unscripted run_text label: {label}")
 
     def count(self, label_prefix: str) -> int:

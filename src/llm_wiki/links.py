@@ -110,6 +110,11 @@ def unwrap_local_links(body: str) -> str:
     return _LOCAL_PAGE_LINK.sub(r"\1", body)
 
 
+def local_link_count(body: str) -> int:
+    """How many cross-page links (``[text](sibling.md)``) the body carries."""
+    return len(_LOCAL_PAGE_LINK.findall(body))
+
+
 def _protected_spans(body: str) -> list[tuple[int, int]]:
     """Inclusive [start, end] spans that must not be linked into."""
     spans: list[tuple[int, int]] = []

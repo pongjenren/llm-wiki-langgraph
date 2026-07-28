@@ -11,7 +11,7 @@ import logging
 
 from langgraph.graph import END, START, StateGraph
 
-from llm_wiki import embedding, pages
+from llm_wiki import embedding, links, pages
 from llm_wiki.db import repo
 from llm_wiki.db.connection import transaction
 from llm_wiki.db.repo import PageCandidate
@@ -161,7 +161,11 @@ def build_item_graph(deps: Deps):
         }
 
     def merge_page(state: ItemState) -> ItemState:
-        """Link the new source to an existing page and integrate the material."""
+        """Link the new source to an existing page and integrate the material.
+
+        A single-shot draft: validating the merge and correcting any loss is the
+        job of review_merge_page and its refine loop, which see the same inputs.
+        """
         item = state["item"]
         namespace = state["namespace"]
         page_id = state["page_id"]
@@ -175,54 +179,112 @@ def build_item_graph(deps: Deps):
             )
 
         existing_body = pages.read_page(deps.wiki_dir, namespace, state["page_name"])
-
-        prompt = prompts.merge_page(item, existing_body, reference_number)
-        merged = ""
-        problems: list[str] = []
-
-        # A full rewrite can silently drop content, so the result is checked
-        # programmatically and re-requested with the specific loss named.
-        for attempt in range(settings.review_retries + 1):
-            merged = pages.strip_references(
-                deps.client.run_text(prompt, label=f"merge-page#{attempt}")
+        merged = pages.strip_references(
+            deps.client.run_text(
+                prompts.merge_page(item, existing_body, reference_number),
+                label=f"merge-page#{state.get('page_attempts', 0)}",
             )
-            problems = pages.validate_merge(existing_body, merged)
-            if not problems:
-                break
-            log.info("merge validation failed for %r: %s", state["page_name"], problems)
-            prompt = (
-                f"{prompts.merge_page(item, existing_body, reference_number)}\n\n"
-                f"Your previous merge was rejected: {pages.format_issues(problems)}\n"
-                "Produce the merged page again, preserving everything named above."
-            )
-
+        )
         return {
             "reference_number": reference_number,
             "existing_body": existing_body,
             "body": merged,
-            # Never clear a flag an earlier step set: an item that failed its own
-            # review still needs a human even if the merge came out clean.
-            "needs_review": bool(problems) or bool(state.get("needs_review")),
-            "page_issues": problems,
         }
 
-    def review_page(state: ItemState) -> ItemState:
-        review = deps.client.run_json(
-            prompts.review_page(state["page_name"], state["body"]), Review, label="page-review"
-        )
-        if review.verdict == "pass":
-            return {"page_issues": []}
-        log.info("page review failed for %r: %s", state["page_name"], review.issues)
-        return {"page_issues": review.issues}
+    def _reference_coverage_issues(state: ItemState) -> list[str]:
+        """Every source the page cites must appear as a marker in the body."""
+        expected = {
+            row["reference_order"] for row in repo.list_references(deps.conn, state["page_id"])
+        }
+        missing = expected - pages.citations(state["body"])
+        if not missing:
+            return []
+        numbers = ", ".join(f"[{n}]" for n in sorted(missing))
+        return [f"These references have no citation marker in the page: {numbers}."]
 
-    def refine_page(state: ItemState) -> ItemState:
+    def review_create_page(state: ItemState) -> ItemState:
+        item = state["item"]
+        # The one source is cited as [reference_number]; it must land in the body.
+        issues: list[str] = []
+        if state["reference_number"] not in pages.citations(state["body"]):
+            issues.append(
+                f"The source's citation [{state['reference_number']}] does not "
+                "appear anywhere in the page."
+            )
+        review = deps.client.run_json(
+            prompts.review_create_page(
+                state["page_name"], state["body"], item.description, state["reference_number"]
+            ),
+            Review,
+            label="create-review",
+        )
+        if review.verdict != "pass":
+            issues.extend(review.issues)
+        if issues:
+            log.info("create review failed for %r: %s", state["page_name"], issues)
+        return {"page_issues": issues}
+
+    def review_merge_page(state: ItemState) -> ItemState:
+        item = state["item"]
+        existing_body = state["existing_body"]
+        body = state["body"]
+
+        # Programmatic guards against a full rewrite quietly losing content.
+        issues = pages.validate_merge(existing_body, body)
+        issues.extend(_reference_coverage_issues(state))
+        if links.local_link_count(body) < links.local_link_count(existing_body):
+            issues.append(
+                "The merged page has fewer cross-page links ([text](page.md)) than "
+                "the existing page; restore the dropped links."
+            )
+
+        review = deps.client.run_json(
+            prompts.review_merge_page(
+                state["page_name"],
+                existing_body,
+                item.description,
+                body,
+                state["reference_number"],
+            ),
+            Review,
+            label="merge-review",
+        )
+        if review.verdict != "pass":
+            issues.extend(review.issues)
+        if issues:
+            log.info("merge review failed for %r: %s", state["page_name"], issues)
+        return {"page_issues": issues}
+
+    def refine_create_page(state: ItemState) -> ItemState:
         body = deps.client.run_text(
-            prompts.refine_page(state["body"], state["page_issues"]), label="page-refine"
+            prompts.refine_create_page(
+                state["page_name"],
+                state["body"],
+                state["item"].description,
+                state["reference_number"],
+                state["page_issues"],
+            ),
+            label="create-refine",
         )
         return {
             "body": pages.strip_references(body),
             "page_attempts": state.get("page_attempts", 0) + 1,
         }
+
+    def refine_merge_page(state: ItemState) -> ItemState:
+        # A refine is a re-merge: redo it from the existing page and new material
+        # with the named problems, so structural losses can be reconstructed.
+        attempts = state.get("page_attempts", 0) + 1
+        body = deps.client.run_text(
+            prompts.refine_merge_page(
+                state["item"],
+                state["existing_body"],
+                state["reference_number"],
+                state["page_issues"],
+            ),
+            label=f"merge-page#{attempts}",
+        )
+        return {"body": pages.strip_references(body), "page_attempts": attempts}
 
     def persist(state: ItemState) -> ItemState:
         """Write the page and refresh the namespace index."""
@@ -266,8 +328,10 @@ def build_item_graph(deps: Deps):
     graph.add_node("resolve_entity", resolve_entity)
     graph.add_node("create_page", create_page)
     graph.add_node("merge_page", merge_page)
-    graph.add_node("review_page", review_page)
-    graph.add_node("refine_page", refine_page)
+    graph.add_node("review_create_page", review_create_page)
+    graph.add_node("refine_create_page", refine_create_page)
+    graph.add_node("review_merge_page", review_merge_page)
+    graph.add_node("refine_merge_page", refine_merge_page)
     graph.add_node("flag_page", flag_page)
     graph.add_node("persist", persist)
 
@@ -275,15 +339,21 @@ def build_item_graph(deps: Deps):
     graph.add_conditional_edges(
         "resolve_entity", after_resolve, {"create": "create_page", "merge": "merge_page"}
     )
-    graph.add_edge("create_page", "review_page")
-    graph.add_edge("merge_page", "review_page")
+    graph.add_edge("create_page", "review_create_page")
+    graph.add_edge("merge_page", "review_merge_page")
 
     graph.add_conditional_edges(
-        "review_page",
+        "review_create_page",
         after_page_review,
-        {"persist": "persist", "refine": "refine_page", "give_up": "flag_page"},
+        {"persist": "persist", "refine": "refine_create_page", "give_up": "flag_page"},
     )
-    graph.add_edge("refine_page", "review_page")
+    graph.add_conditional_edges(
+        "review_merge_page",
+        after_page_review,
+        {"persist": "persist", "refine": "refine_merge_page", "give_up": "flag_page"},
+    )
+    graph.add_edge("refine_create_page", "review_create_page")
+    graph.add_edge("refine_merge_page", "review_merge_page")
     graph.add_edge("flag_page", "persist")
     graph.add_edge("persist", END)
 

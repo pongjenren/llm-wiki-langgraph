@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Sequence
 
 from llm_wiki.db import repo
 from llm_wiki.db.connection import Connection
@@ -155,7 +154,3 @@ def validate_merge(old_body: str, new_body: str) -> list[str]:
         problems.append(f"These sections from the existing page were dropped: {names}.")
 
     return problems
-
-
-def format_issues(issues: Sequence[str]) -> str:
-    return "; ".join(issues)

@@ -195,6 +195,8 @@ Rules:
   [{reference_number}] on every claim it supports.
 - Keep all existing sections. You may add sections, extend prose, and reorder
   for coherence, but do not drop existing content.
+- Preserve every cross-page link such as [Attention](Attention.md): keep the
+  link markup intact, never flatten it back to plain text.
 - Where the new material conflicts with existing content, state both and
   attribute each to its citation rather than silently overwriting.
 - Do not add outside knowledge, and do not write a References section.
@@ -213,22 +215,80 @@ Reply with the complete merged page markdown only.
 """.strip()
 
 
-def review_page(page_name: str, page_markdown: str) -> str:
+def review_create_page(
+    page_name: str, page_markdown: str, description: str, reference_number: int
+) -> str:
     return f"""
-Review a wiki page for publication.
+Review a newly written wiki page for "{page_name}" before publication.
+
+You are given the source material the page was written from and the page itself.
+The page must be well-formed AND cover the source material faithfully, without
+losing information it provides.
 
 Fail it if any of these hold:
 - It does not open with a clear definition of "{page_name}".
+- It omits substantive facts that the source material provides.
 - It contradicts itself, or repeats the same claim in several places.
-- It contains claims with no citation marker.
+- It contains claims with no citation marker, or fails to cite the material as
+  [{reference_number}] on the claims it supports.
 - It is malformed markdown, or has more than one level-1 heading.
 - It contains placeholder text or empty sections.
 
 Otherwise pass it.
 
+Source material (cited as [{reference_number}]):
+---
+{description}
+---
+
 Page:
 ---
 {page_markdown}
+---
+""".strip()
+
+
+def review_merge_page(
+    page_name: str,
+    existing_page: str,
+    description: str,
+    merged_page: str,
+    reference_number: int,
+) -> str:
+    return f"""
+Review a merged wiki page for "{page_name}" before publication.
+
+The page was produced by folding new source material into an existing page. You
+are given the existing (old) page, the new material, and the merged result. The
+merge must keep everything the old page carried and fully integrate the new
+material.
+
+Fail it if any of these hold:
+- It drops facts, sections, citation markers, or cross-page links
+  ([text](page.md)) that the existing page carried.
+- It omits substantive facts from the new material, or fails to cite that
+  material as [{reference_number}] on the claims it supports.
+- Where the old and new material conflict, it silently overwrote one instead of
+  stating both and attributing each to its citation.
+- It does not open with a clear definition of "{page_name}".
+- It contradicts itself or repeats claims, is malformed markdown, has more than
+  one level-1 heading, or contains placeholder text or empty sections.
+
+Otherwise pass it.
+
+Existing page:
+---
+{existing_page}
+---
+
+New material (cited as [{reference_number}]):
+---
+{description}
+---
+
+Merged page:
+---
+{merged_page}
 ---
 """.strip()
 
@@ -276,18 +336,34 @@ Rules:
 """.strip()
 
 
-def refine_page(page_markdown: str, issues: list[str]) -> str:
+def refine_create_page(
+    page_name: str,
+    page_markdown: str,
+    description: str,
+    reference_number: int,
+    issues: list[str],
+) -> str:
     bullets = "\n".join(f"- {issue}" for issue in issues) or "- (unspecified)"
     return f"""
-Revise this wiki page to fix the problems found in review.
+Revise this wiki page for "{page_name}" to fix the problems found in review.
 
 Problems:
 {bullets}
 
+The source material is provided below; use it to restore anything the page is
+missing.
+
 Rules:
-- Fix only what the problems call for.
-- Preserve every existing citation marker on the claims that carry them.
-- Do not add facts or outside knowledge, and do not write a References section.
+- Fix every problem above.
+- Use only facts from the source material; add no outside knowledge.
+- Cite the material as [{reference_number}] on every claim it supports.
+- Open with a clear definition, keep a single level-1 heading, and do not write
+  a References section.
+
+Source material:
+---
+{description}
+---
 
 Page:
 ---
@@ -295,4 +371,20 @@ Page:
 ---
 
 Reply with the corrected page markdown only.
+""".strip()
+
+
+def refine_merge_page(
+    item: ExtractedItem, existing_page: str, reference_number: int, issues: list[str]
+) -> str:
+    bullets = "\n".join(f"- {issue}" for issue in issues) or "- (unspecified)"
+    return f"""
+{merge_page(item, existing_page, reference_number)}
+
+Your previous merge was rejected in review for these problems:
+{bullets}
+
+Produce the merged page again, fixing every problem above. Restore anything the
+previous attempt dropped from the existing page -- sections, citation markers,
+and cross-page links -- while keeping the new material fully integrated.
 """.strip()

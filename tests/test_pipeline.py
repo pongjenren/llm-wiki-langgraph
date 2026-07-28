@@ -183,6 +183,63 @@ def test_merge_that_never_recovers_is_flagged(make_deps, docs, conn, settings):
     assert "needs a human check" in body
 
 
+class MissingReferenceMergeClient(TransformerClient):
+    """First merge never cites the new source [2]; the second one does."""
+
+    def merge_page(self, attempt: int) -> str:
+        return PAGE_V1 if attempt == 0 else PAGE_MERGED
+
+
+def test_merge_missing_the_new_reference_is_retried(make_deps, docs, settings):
+    client = MissingReferenceMergeClient()
+    deps = make_deps(client)
+    ingest_document(deps, "ml", docs[0])
+    outcome = ingest_document(deps, "ml", docs[1])
+
+    assert client.count("merge-page") == 2, "an uncited new source must force a re-merge"
+    assert not outcome.items[0].needs_review
+    body = (settings.wiki_dir / "ml" / "Transformer.md").read_text(encoding="utf-8")
+    assert "[2]" in body
+
+
+PAGE_LINKED_V1 = """# Transformer
+
+The Transformer builds on [Attention](Attention.md) [1].
+"""
+
+MERGE_DROPS_LINK = """# Transformer
+
+The Transformer builds on attention [1]. It scales predictably [2].
+"""
+
+MERGE_KEEPS_LINK = """# Transformer
+
+The Transformer builds on [Attention](Attention.md) [1]. It scales predictably [2].
+"""
+
+
+class LinkDroppingMergeClient(TransformerClient):
+    """The existing page carries a cross-page link; the first merge flattens it."""
+
+    def create_page(self) -> str:
+        return PAGE_LINKED_V1
+
+    def merge_page(self, attempt: int) -> str:
+        return MERGE_DROPS_LINK if attempt == 0 else MERGE_KEEPS_LINK
+
+
+def test_merge_that_drops_a_cross_page_link_is_retried(make_deps, docs, settings):
+    client = LinkDroppingMergeClient()
+    deps = make_deps(client)
+    ingest_document(deps, "ml", docs[0])
+    outcome = ingest_document(deps, "ml", docs[1])
+
+    assert client.count("merge-page") == 2, "losing a cross-page link must force a re-merge"
+    assert not outcome.items[0].needs_review
+    body = (settings.wiki_dir / "ml" / "Transformer.md").read_text(encoding="utf-8")
+    assert "[Attention](Attention.md)" in body
+
+
 class VariantNameClient(ScriptedClient):
     """The same entity appears under a singular and a plural name.
 
