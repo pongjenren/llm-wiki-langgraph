@@ -1,54 +1,53 @@
 {% extends "base.html" %}
-{% block title %}Run #{{ run["run_id"] }} · llm-wiki ingest{% endblock %}
+{% block title %}Source #{{ source["id"] }} · llm-wiki ingest{% endblock %}
 
 {% macro badge(status) %}
-{%- set label = {'ok':'成功','skipped':'跳過','failed':'失敗'}.get(status, status) -%}
+{%- set label = {'ok':'成功','failed':'失敗'}.get(status, status) -%}
 <span class="badge {{ status }}">{{ label }}</span>
 {%- endmacro %}
 
 {% block body %}
 
 <p class="muted"><a href="/">← 回總覽</a></p>
-<h2>Run #{{ run["run_id"] }}</h2>
+<h2>Source #{{ source["id"] }}</h2>
 <div class="card tiles">
-  <div class="tile"><div class="n">{{ run["total_seconds"] | duration }}</div><div class="k">總耗時</div></div>
-  <div class="tile"><div class="n">{{ run["doc_count"] }}</div><div class="k">文件數</div></div>
-  <div class="tile"><div class="n">{{ run["created"] }}</div><div class="k">頁面建立</div></div>
-  <div class="tile"><div class="n">{{ run["merged"] }}</div><div class="k">合併</div></div>
-  <div class="tile"><div class="n">{{ run["skipped"] }}</div><div class="k">跳過</div></div>
-  <div class="tile"><div class="n">{{ run["flagged"] }}</div><div class="k">待審</div></div>
-  <div class="tile"><div class="n">{{ run["failed"] }}</div><div class="k">失敗</div></div>
+  <div class="tile"><div class="v">{{ badge(source["status"]) }}</div><div class="k">狀態</div></div>
+  <div class="tile"><div class="n">{{ source["seconds"] | duration }}</div><div class="k">耗時</div></div>
+  <div class="tile"><div class="n">{{ pages | length }}</div><div class="k">頁面</div></div>
 </div>
-<p class="muted">開始 {{ run["started_at"] | dt }} · 完成 {{ run["finished_at"] | dt }}</p>
-
-<h2>每檔 log</h2>
-{% for d in docs %}
-<div class="card" style="margin-bottom:12px; padding:14px 16px">
+<div class="card" style="margin-top:12px; padding:14px 16px">
   <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap">
-    {{ badge(d.row["status"]) }}
-    <strong>{{ d.row["namespace"] }} / {{ d.row["filename"] }}</strong>
-    <span class="muted">{{ d.row["seconds"] | duration }}</span>
+    <strong>{{ source["namespace"] }} / {{ source["filename"] }}</strong>
   </div>
-  <p class="path" style="margin:6px 0 0">{{ d.row["path"] }}</p>
-  {% if d.row["error"] %}<p class="err" style="margin:8px 0 0"><code>{{ d.row["error"] }}</code></p>{% endif %}
-  {% if d.row["skip_reason"] %}<p class="muted" style="margin:8px 0 0">{{ d.row["skip_reason"] }}</p>{% endif %}
-  {% if d.entries %}
-  <ul class="items">
-    {% for item in d.entries %}
-    <li>
-      {% if item.action == 'created' %}<span class="badge created">建立</span>
-      {% elif item.action == 'merged' %}<span class="badge merged">合併 [{{ item.reference_number }}]</span>
-      {% else %}<span class="badge failed">失敗</span>{% endif %}
-      <code>{{ item.page_name }}</code>
-      {% if item.needs_review %}<span class="badge flag">待審</span>{% endif %}
-      {% if item.error %}<span class="err">— {{ item.error }}</span>{% endif %}
-    </li>
-    {% endfor %}
-  </ul>
+  <p class="muted" style="margin:6px 0 0">
+    ingest 於 {{ source["ingest_time"] | dt }}
+    {% if source["timestamp"] %} · 文件時間 {{ source["timestamp"] | dt }}{% endif %}
+  </p>
+  {% if source["sha256"] %}<p class="path" style="margin:6px 0 0">sha256 {{ source["sha256"] }}</p>{% endif %}
+  {% if source["error_msg"] %}<p class="err" style="margin:8px 0 0"><code>{{ source["error_msg"] }}</code></p>{% endif %}
+</div>
+
+<h2>建立/合併的頁面</h2>
+<div class="card scroll">
+  {% if pages %}
+  <table>
+    <thead>
+      <tr><th>參考編號</th><th>頁面</th><th>類型</th><th>待審</th></tr>
+    </thead>
+    <tbody>
+      {% for p in pages %}
+      <tr>
+        <td>[{{ p["reference_order"] }}]</td>
+        <td><code>{{ p["page_name"] }}</code></td>
+        <td class="muted">{{ p["type"] }}</td>
+        <td>{% if p["needs_review"] %}<span class="badge flag">待審</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">這份文件沒有產生任何頁面。</div>
   {% endif %}
 </div>
-{% else %}
-<div class="card empty">這次 run 沒有文件紀錄。</div>
-{% endfor %}
 
 {% endblock %}

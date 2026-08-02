@@ -40,6 +40,8 @@
     .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }
     .tile { padding: 14px 16px; }
     .tile .n { font-size: 26px; font-weight: 650; }
+    /* Same slot as .n, for a tile whose value is a badge rather than a number. */
+    .tile .v { min-height: 39px; display: flex; align-items: center; }
     .tile .k { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
     .scroll { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -50,18 +52,13 @@
     .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
     .badge.ok { background: var(--ok-bg); color: var(--ok-fg); }
     .badge.pending { background: var(--pending-bg); color: var(--pending-fg); }
-    .badge.skipped { background: var(--skip-bg); color: var(--skip-fg); }
     .badge.failed { background: var(--fail-bg); color: var(--fail-fg); }
-    .badge.created { background: var(--ok-bg); color: var(--ok-fg); }
-    .badge.merged { background: var(--pending-bg); color: var(--pending-fg); }
     .badge.flag { background: var(--skip-bg); color: var(--skip-fg); }
     .btn { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
     .btn:hover { border-color: var(--accent); }
     .empty { padding: 28px; text-align: center; color: var(--muted); }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
     .err { color: var(--fail-fg); }
-    ul.items { margin: 6px 0 0; padding-left: 0; list-style: none; }
-    ul.items li { padding: 2px 0; }
   </style>
 </head>
 <body>

@@ -67,8 +67,8 @@ def create_app(app_settings: Settings = settings) -> Starlette:
         try:
             from llm_wiki.db import repo
 
-            runs = repo.list_runs(conn, limit=50)
-            latest = runs[0] if runs else None
+            sources = repo.list_sources(conn, limit=50)
+            latest = sources[0] if sources else None
             status = compute_raw_status(conn, app_settings.raw_dir)
         finally:
             conn.close()
@@ -77,34 +77,32 @@ def create_app(app_settings: Settings = settings) -> Starlette:
             "overview.html",
             {
                 "latest": latest,
-                "runs": runs,
+                "sources": sources,
                 "status": status,
                 "raw_dir": str(app_settings.raw_dir),
             },
         )
 
-    async def run_detail(request: Request) -> Response:
-        run_id = int(request.path_params["run_id"])
+    async def source_detail(request: Request) -> Response:
+        source_id = int(request.path_params["source_id"])
         conn = _connect()
         try:
             from llm_wiki.db import repo
 
-            run = repo.get_run(conn, run_id)
-            docs = repo.list_run_docs(conn, run_id) if run else []
+            source = repo.get_source(conn, source_id)
+            pages = repo.list_source_pages(conn, source_id) if source else []
         finally:
             conn.close()
-        if run is None:
-            return HTMLResponse(f"Run {run_id} not found.", status_code=404)
-        # items_json is a JSONB column, so psycopg2 returns it already parsed.
-        docs_view = [{"row": doc, "entries": doc["items_json"] or []} for doc in docs]
+        if source is None:
+            return HTMLResponse(f"Source {source_id} not found.", status_code=404)
         return templates.TemplateResponse(
-            request, "run.html", {"run": run, "docs": docs_view}
+            request, "run.html", {"source": source, "pages": pages}
         )
 
     return Starlette(
         routes=[
             Route("/", overview),
-            Route("/runs/{run_id:int}", run_detail),
+            Route("/sources/{source_id:int}", source_detail),
         ]
     )
 

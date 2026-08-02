@@ -40,6 +40,11 @@ def _now() -> datetime:
 
 
 def find_source_by_sha(conn: Connection, namespace: str, sha256: str) -> Row | None:
+    """The existing row for this document, whatever its outcome.
+
+    A failed row counts: a document is attempted once. Retrying one means
+    deleting its source row first.
+    """
     return conn.execute(
         "SELECT * FROM source WHERE namespace = %s AND sha256 = %s", (namespace, sha256)
     ).fetchone()
@@ -50,22 +55,63 @@ def insert_source(
     *,
     filename: str,
     namespace: str,
-    sha256: str,
+    sha256: str | None,
     timestamp: str | None = None,
+    status: str = "ok",
+    error_msg: str | None = None,
+    seconds: float | None = None,
 ) -> int:
     row = conn.execute(
         """
-        INSERT INTO source (filename, timestamp, namespace, sha256, ingest_time)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO source
+            (filename, timestamp, namespace, sha256, ingest_time, status, error_msg, seconds)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (filename, timestamp, namespace, sha256, _now()),
+        (filename, timestamp, namespace, sha256, _now(), status, error_msg, seconds),
     ).fetchone()
     return int(row["id"])
 
 
+def finish_source(
+    conn: Connection,
+    source_id: int,
+    *,
+    status: str,
+    error_msg: str | None,
+    seconds: float | None,
+) -> None:
+    """Stamp a source with the outcome of the ingest that created it.
+
+    The row is written mid-pipeline (items need a source_id to cite), so its
+    final status is only known once every item has been folded in.
+    """
+    conn.execute(
+        "UPDATE source SET status = %s, error_msg = %s, seconds = %s WHERE id = %s",
+        (status, error_msg, seconds, source_id),
+    )
+
+
 def get_source(conn: Connection, source_id: int) -> Row | None:
     return conn.execute("SELECT * FROM source WHERE id = %s", (source_id,)).fetchone()
+
+
+def list_sources(conn: Connection, limit: int = 50) -> list[Row]:
+    """Most recently ingested documents first. Powers the dashboard history."""
+    return conn.execute(
+        "SELECT * FROM source ORDER BY id DESC LIMIT %s", (limit,)
+    ).fetchall()
+
+
+def sources_by_namespace_filename(conn: Connection) -> dict[tuple[str, str], Row]:
+    """Every source keyed by (namespace, filename), latest attempt winning.
+
+    Lets the dashboard annotate the files under raw/ with their outcome. The key
+    is looser than a path -- two same-named files in different sub-directories of
+    one namespace collide -- but namespaces are flat in practice.
+    """
+    rows = conn.execute("SELECT * FROM source ORDER BY id").fetchall()
+    return {(row["namespace"], row["filename"]): row for row in rows}
 
 
 # --------------------------------------------------------------------------
@@ -287,6 +333,20 @@ def link_source(conn: Connection, *, wiki_id: int, source_id: int, namespace: st
     return reference_order
 
 
+def list_source_pages(conn: Connection, source_id: int) -> list[Row]:
+    """Pages this source contributed to. The dashboard's per-document detail."""
+    return conn.execute(
+        """
+        SELECT p.page_id, p.page_name, p.type, p.needs_review, ws.reference_order
+        FROM wiki_source ws
+        JOIN wiki_pages p ON p.page_id = ws.wiki_id
+        WHERE ws.source_id = %s
+        ORDER BY lower(p.page_name)
+        """,
+        (source_id,),
+    ).fetchall()
+
+
 def list_references(conn: Connection, wiki_id: int) -> list[Row]:
     return conn.execute(
         """
@@ -375,128 +435,3 @@ def list_outgoing_links(conn: Connection, src_page_id: int) -> list[Row]:
         """,
         (src_page_id,),
     ).fetchall()
-
-
-# --------------------------------------------------------------------------
-# ingest_run / ingest_doc  (dashboard telemetry)
-# --------------------------------------------------------------------------
-
-
-def start_run(conn: Connection, *, started_at: datetime | None = None) -> int:
-    row = conn.execute(
-        "INSERT INTO ingest_run (started_at) VALUES (%s) RETURNING run_id",
-        (started_at or _now(),),
-    ).fetchone()
-    return int(row["run_id"])
-
-
-def finish_run(
-    conn: Connection,
-    run_id: int,
-    *,
-    total_seconds: float,
-    doc_count: int,
-    created: int,
-    merged: int,
-    skipped: int,
-    flagged: int,
-    failed: int,
-    finished_at: datetime | None = None,
-) -> None:
-    conn.execute(
-        """
-        UPDATE ingest_run
-        SET finished_at = %s, total_seconds = %s, doc_count = %s, created = %s,
-            merged = %s, skipped = %s, flagged = %s, failed = %s
-        WHERE run_id = %s
-        """,
-        (
-            finished_at or _now(),
-            total_seconds,
-            doc_count,
-            created,
-            merged,
-            skipped,
-            flagged,
-            failed,
-            run_id,
-        ),
-    )
-
-
-def insert_ingest_doc(
-    conn: Connection,
-    *,
-    run_id: int,
-    namespace: str,
-    filename: str,
-    path: str,
-    status: str,
-    seconds: float | None,
-    skip_reason: str | None = None,
-    error: str | None = None,
-    items_json: str = "[]",
-) -> int:
-    row = conn.execute(
-        """
-        INSERT INTO ingest_doc
-            (run_id, namespace, filename, path, status, seconds, skip_reason, error, items_json)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        RETURNING id
-        """,
-        (run_id, namespace, filename, path, status, seconds, skip_reason, error, items_json),
-    ).fetchone()
-    return int(row["id"])
-
-
-def list_runs(conn: Connection, limit: int = 50) -> list[Row]:
-    return conn.execute(
-        "SELECT * FROM ingest_run ORDER BY run_id DESC LIMIT %s", (limit,)
-    ).fetchall()
-
-
-def get_run(conn: Connection, run_id: int) -> Row | None:
-    return conn.execute("SELECT * FROM ingest_run WHERE run_id = %s", (run_id,)).fetchone()
-
-
-def latest_run(conn: Connection) -> Row | None:
-    return conn.execute(
-        "SELECT * FROM ingest_run ORDER BY run_id DESC LIMIT 1"
-    ).fetchone()
-
-
-def list_run_docs(conn: Connection, run_id: int) -> list[Row]:
-    return conn.execute(
-        "SELECT * FROM ingest_doc WHERE run_id = %s ORDER BY id", (run_id,)
-    ).fetchall()
-
-
-def latest_ingest_docs(conn: Connection) -> list[Row]:
-    """Most recent ingest_doc per (namespace, path), oldest id first.
-
-    Used to annotate raw files with their last-known outcome. Later runs win: a
-    file that failed once and later succeeded shows as ok. Returned in id order
-    so callers building their own indexes get last-write-wins for free.
-    """
-    return conn.execute(
-        """
-        SELECT d.*, r.finished_at AS run_finished_at, r.started_at AS run_started_at
-        FROM ingest_doc d
-        JOIN (
-            SELECT namespace, path, MAX(id) AS max_id
-            FROM ingest_doc GROUP BY namespace, path
-        ) latest ON latest.max_id = d.id
-        JOIN ingest_run r ON r.run_id = d.run_id
-        ORDER BY d.id
-        """
-    ).fetchall()
-
-
-def source_filenames_by_namespace(conn: Connection) -> set[tuple[str, str]]:
-    """(namespace, filename) pairs that already have a `source` row.
-
-    Lets the dashboard mark files ingested before telemetry existed (which have
-    no ingest_doc row) as already ingested rather than pending.
-    """
-    rows = conn.execute("SELECT namespace, filename FROM source").fetchall()
-    return {(row["namespace"], row["filename"]) for row in rows}

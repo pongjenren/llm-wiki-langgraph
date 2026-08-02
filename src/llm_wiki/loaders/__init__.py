@@ -44,6 +44,16 @@ class UnsupportedFileType(Exception):
         self.path = path
 
 
+def file_sha256(path: Path) -> str:
+    """Hash a file's raw bytes.
+
+    Split out from :func:`load` so a document that failed *during* extraction can
+    still be identified by its hash without re-running the (possibly expensive,
+    possibly broken) loader.
+    """
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def load(path: Path) -> LoadedDocument:
     """Read a file into text plus the hash of its raw bytes.
 
@@ -54,7 +64,7 @@ def load(path: Path) -> LoadedDocument:
     if loader is None:
         raise UnsupportedFileType(path)
 
-    sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+    sha256 = file_sha256(path)
     timestamp = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
     return LoadedDocument(path=path, text=loader(path), sha256=sha256, timestamp=timestamp)
 

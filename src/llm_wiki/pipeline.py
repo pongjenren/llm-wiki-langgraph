@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from llm_wiki import loaders
 from llm_wiki.graph import Deps, build_doc_graph, build_item_graph
 
 log = logging.getLogger(__name__)
@@ -31,6 +32,10 @@ class DocumentOutcome:
     skipped: bool = False
     skip_reason: str | None = None
     source_id: int | None = None
+    # None only when the file could not be read at all. Carried out of the graph
+    # so a document that failed before its source row was written can still be
+    # recorded under its own hash.
+    sha256: str | None = None
     items: list[ItemOutcome] = field(default_factory=list)
     error: str | None = None
     elapsed_seconds: float = 0.0
@@ -54,9 +59,17 @@ def ingest_document(deps: Deps, namespace: str, path: Path) -> DocumentOutcome:
             log.error("failed to process %s: %s", path, exc)
             log.debug("traceback for %s", path, exc_info=True)
             outcome.error = f"{type(exc).__name__}: {exc}"
+            # The graph raised, so its state (and the hash it computed) is gone.
+            # Re-hash the bytes directly: the caller records the failure against
+            # this document, and without a hash it has no identity.
+            try:
+                outcome.sha256 = loaders.file_sha256(path)
+            except Exception:  # unreadable file -- the failure itself, most likely
+                log.debug("could not hash %s", path, exc_info=True)
             return outcome
 
         outcome.source_id = doc_state.get("source_id")
+        outcome.sha256 = doc_state.get("sha256")
 
         if doc_state.get("skipped"):
             outcome.skipped = True

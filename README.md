@@ -155,13 +155,15 @@ point `LLM_WIKI_DB_URL` at it (default
 
 | Table | Holds |
 |---|---|
-| `source` | ingested documents, keyed `UNIQUE(namespace, sha256)` |
+| `source` | ingested documents, keyed `UNIQUE(namespace, sha256)`, carrying each document's ingest outcome (`status`, `error_msg`, `seconds`) |
 | `wiki_pages` | page metadata, `UNIQUE(namespace, page_name)`, plus `needs_review` |
 | `page_aliases` | names → page, PK `(namespace, query_name)`, typed `canonical` / `embedding_sim` / `manual` |
 | `wiki_source` | which sources cite a page and in what order, `UNIQUE(wiki_id, source_id)` |
 | `wiki_links` | directed page → page links, PK `(src_page_id, dst_page_id)`, indexed by target for backlinks |
-| `wiki_page_embeddings` | pgvector `vector(N)` table with an HNSW cosine index; created at runtime because its dimension follows the embedding model |
-| `ingest_run` / `ingest_doc` | per-run and per-document ingest telemetry, powering the dashboard |
+
+Page name embeddings live on `wiki_pages.embedding` (`vector(4096)`, matching
+NV-Embed-v2). There is no separate ingest telemetry table: one ingest is one
+document, so the `source` row is what the dashboard reads.
 
 ## Development
 

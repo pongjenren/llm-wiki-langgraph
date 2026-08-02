@@ -25,8 +25,6 @@ DROP_ALL_SQL = """
 DROP TABLE IF EXISTS
     wiki_links,
     wiki_source,
-    ingest_doc,
-    ingest_run,
     page_aliases,
     wiki_pages,
     source

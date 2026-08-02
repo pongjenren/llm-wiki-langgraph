@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -171,13 +170,11 @@ def ingest(
         conn = connect(settings.db_url)
         try:
             init_db(conn)
-            start = time.monotonic()
             client = LLMClient()
             deps = Deps(conn=conn, client=client, settings=settings)
             outcomes = ingest_documents(deps, targets)
-            elapsed = time.monotonic() - start
             try:
-                telemetry.record_run(conn, outcomes, elapsed)
+                telemetry.record_documents(conn, outcomes)
             except Exception as exc:  # telemetry must never fail an ingest
                 log.warning("failed to record ingest telemetry: %s", exc)
             _link_touched_pages(conn, client, outcomes)

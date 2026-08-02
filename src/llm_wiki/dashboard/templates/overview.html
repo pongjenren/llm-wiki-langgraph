@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% macro badge(status) %}
-{%- set label = {'ok':'已 ingest','pending':'待處理','skipped':'跳過','failed':'失敗'}.get(status, status) -%}
+{%- set label = {'ok':'成功','pending':'待處理','failed':'失敗'}.get(status, status) -%}
 <span class="badge {{ status }}">{{ label }}</span>
 {%- endmacro %}
 
@@ -10,16 +10,13 @@
 <h2>最近一次 ingest</h2>
 {% if latest %}
 <div class="card tiles">
-  <div class="tile"><div class="n">{{ latest["total_seconds"] | duration }}</div><div class="k">總耗時</div></div>
-  <div class="tile"><div class="n">{{ latest["doc_count"] }}</div><div class="k">文件數</div></div>
-  <div class="tile"><div class="n">{{ latest["created"] }}</div><div class="k">頁面建立</div></div>
-  <div class="tile"><div class="n">{{ latest["merged"] }}</div><div class="k">合併</div></div>
-  <div class="tile"><div class="n">{{ latest["skipped"] }}</div><div class="k">跳過</div></div>
-  <div class="tile"><div class="n">{{ latest["flagged"] }}</div><div class="k">待審</div></div>
-  <div class="tile"><div class="n">{{ latest["failed"] }}</div><div class="k">失敗</div></div>
+  <div class="tile"><div class="v">{{ badge(latest["status"]) }}</div><div class="k">狀態</div></div>
+  <div class="tile"><div class="n">{{ latest["seconds"] | duration }}</div><div class="k">耗時</div></div>
+  <div class="tile"><div class="n">{{ latest["namespace"] }}</div><div class="k">Namespace</div></div>
 </div>
-<p class="muted">Run #{{ latest["run_id"] }} · 完成於 {{ latest["finished_at"] | dt }} ·
-  <a href="/runs/{{ latest['run_id'] }}">查看每檔 log →</a></p>
+<p class="muted"><code>{{ latest["filename"] }}</code> · 完成於 {{ latest["ingest_time"] | dt }} ·
+  <a href="/sources/{{ latest['id'] }}">查看詳情 →</a></p>
+{% if latest["error_msg"] %}<p class="err"><code>{{ latest["error_msg"] }}</code></p>{% endif %}
 {% else %}
 <div class="card empty">還沒有任何 ingest 紀錄。跑 <code>llm-wiki ingest</code> 之後回來看。</div>
 {% endif %}
@@ -29,7 +26,6 @@
 <div class="card tiles" style="margin-bottom:12px">
   <div class="tile"><div class="n">{{ status.counts.pending }}</div><div class="k">待處理</div></div>
   <div class="tile"><div class="n">{{ status.counts.ok }}</div><div class="k">已 ingest</div></div>
-  <div class="tile"><div class="n">{{ status.counts.skipped }}</div><div class="k">跳過</div></div>
   <div class="tile"><div class="n">{{ status.counts.failed }}</div><div class="k">失敗</div></div>
 </div>
 <div class="card scroll">
@@ -43,13 +39,14 @@
       <tr>
         <td>{{ badge(f.status) }}</td>
         <td>{{ f.namespace }}</td>
-        <td><code>{{ f.filename }}</code></td>
+        <td>
+          {% if f.source_id %}<a href="/sources/{{ f.source_id }}"><code>{{ f.filename }}</code></a>
+          {% else %}<code>{{ f.filename }}</code>{% endif %}
+        </td>
         <td>{{ f.seconds | duration }}</td>
         <td class="muted">{{ f.last_processed | dt }}</td>
         <td class="wrap-cell">
-          {% if f.error %}<span class="err">{{ f.error }}</span>
-          {% elif f.skip_reason %}<span class="muted">{{ f.skip_reason }}</span>
-          {% endif %}
+          {% if f.error_msg %}<span class="err">{{ f.error_msg }}</span>{% endif %}
         </td>
       </tr>
       {% endfor %}
@@ -62,23 +59,23 @@
 
 <h2>Ingest 歷史</h2>
 <div class="card scroll">
-  {% if runs %}
+  {% if sources %}
   <table>
     <thead>
-      <tr><th>Run</th><th>開始</th><th>總耗時</th><th>文件</th><th>建立</th><th>合併</th><th>跳過</th><th>待審</th><th>失敗</th></tr>
+      <tr><th>Source</th><th>時間</th><th>狀態</th><th>Namespace</th><th>檔案</th><th>耗時</th><th>備註</th></tr>
     </thead>
     <tbody>
-      {% for r in runs %}
+      {% for s in sources %}
       <tr>
-        <td><a href="/runs/{{ r['run_id'] }}">#{{ r["run_id"] }}</a></td>
-        <td class="muted">{{ r["started_at"] | dt }}</td>
-        <td>{{ r["total_seconds"] | duration }}</td>
-        <td>{{ r["doc_count"] }}</td>
-        <td>{{ r["created"] }}</td>
-        <td>{{ r["merged"] }}</td>
-        <td>{{ r["skipped"] }}</td>
-        <td>{{ r["flagged"] }}</td>
-        <td>{{ r["failed"] }}</td>
+        <td><a href="/sources/{{ s['id'] }}">#{{ s["id"] }}</a></td>
+        <td class="muted">{{ s["ingest_time"] | dt }}</td>
+        <td>{{ badge(s["status"]) }}</td>
+        <td>{{ s["namespace"] }}</td>
+        <td><code>{{ s["filename"] }}</code></td>
+        <td>{{ s["seconds"] | duration }}</td>
+        <td class="wrap-cell">
+          {% if s["error_msg"] %}<span class="err">{{ s["error_msg"] }}</span>{% endif %}
+        </td>
       </tr>
       {% endfor %}
     </tbody>

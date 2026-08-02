@@ -1,98 +1,67 @@
-"""Persist ingest outcomes as run/document telemetry for the dashboard.
+"""Stamp each ingested document's outcome onto its `source` row.
 
 This is a pure side-channel: it records what happened, and never changes the
 ingest result. Recording is best-effort — a failure to write telemetry must not
 turn a successful ingest into a failed command — so callers wrap it in a guard.
+
+There is no run-level table: one ingest is one document, so the document's own
+row carries everything the dashboard needs.
 """
 
 from __future__ import annotations
-
-import json
 
 from llm_wiki.db import repo
 from llm_wiki.db.connection import Connection
 from llm_wiki.pipeline import DocumentOutcome
 
 
-def _doc_status(outcome: DocumentOutcome) -> str:
-    if outcome.error is not None or any(item.error for item in outcome.items):
-        return "failed"
+def _error_message(outcome: DocumentOutcome) -> str | None:
+    """The failure text for a document, or None if nothing failed.
+
+    A document-level error is reported as-is. Item-level failures are listed by
+    item name — items that succeeded are not recorded at all.
+    """
+    if outcome.error:
+        return outcome.error
+    failures = [f"{item.name}: {item.error}" for item in outcome.items if item.error]
+    return "\n".join(failures) or None
+
+
+def record_document(conn: Connection, outcome: DocumentOutcome) -> int | None:
+    """Record one document's outcome. Returns its source id, if it has one.
+
+    A document skipped as a duplicate already has a source row from its first
+    ingest, so nothing is written for it.
+    """
     if outcome.skipped:
-        return "skipped"
-    return "ok"
+        return outcome.source_id
 
+    error_msg = _error_message(outcome)
+    status = "failed" if error_msg else "ok"
+    seconds = round(outcome.elapsed_seconds, 3)
 
-def _items_payload(outcome: DocumentOutcome) -> list[dict]:
-    """Per-item log detail, mirroring what the CLI prints, for the dashboard."""
-    payload: list[dict] = []
-    for item in outcome.items:
-        if item.error:
-            action = "failed"
-        elif item.is_new_page:
-            action = "created"
-        else:
-            action = "merged"
-        payload.append(
-            {
-                "name": item.name,
-                "page_name": item.page_name,
-                "action": action,
-                "reference_number": item.reference_number,
-                "needs_review": item.needs_review,
-                "error": item.error,
-            }
+    if outcome.source_id is not None:
+        # The row was written mid-pipeline so items could cite it; only its
+        # outcome is still unknown.
+        repo.finish_source(
+            conn, outcome.source_id, status=status, error_msg=error_msg, seconds=seconds
         )
-    return payload
+        return outcome.source_id
 
-
-def record_run(
-    conn: Connection, outcomes: list[DocumentOutcome], total_seconds: float
-) -> int:
-    """Write one ingest_run plus one ingest_doc per document. Returns run_id."""
-    run_id = repo.start_run(conn)
-
-    created = merged = skipped = flagged = failed = 0
-    for outcome in outcomes:
-        if outcome.error:
-            failed += 1
-        if outcome.skipped:
-            skipped += 1
-        for item in outcome.items:
-            if item.error:
-                failed += 1
-                continue
-            if item.is_new_page:
-                created += 1
-            else:
-                merged += 1
-            if item.needs_review:
-                flagged += 1
-
-        repo.insert_ingest_doc(
-            conn,
-            run_id=run_id,
-            namespace=outcome.namespace,
-            filename=outcome.path.name,
-            # Always canonical: `ingest raw/x.md` and `ingest /abs/raw/x.md`
-            # must produce the same key, or the dashboard cannot match the file
-            # back to the raw/ scan.
-            path=str(outcome.path.resolve()),
-            status=_doc_status(outcome),
-            seconds=round(outcome.elapsed_seconds, 3),
-            skip_reason=outcome.skip_reason,
-            error=outcome.error,
-            items_json=json.dumps(_items_payload(outcome), ensure_ascii=False),
-        )
-
-    repo.finish_run(
+    # Failed before the source row existed (unreadable file, extraction error).
+    # Recording it here is what makes the failure stick: the next ingest finds
+    # this row by hash and skips the document rather than retrying it.
+    return repo.insert_source(
         conn,
-        run_id,
-        total_seconds=round(total_seconds, 3),
-        doc_count=len(outcomes),
-        created=created,
-        merged=merged,
-        skipped=skipped,
-        flagged=flagged,
-        failed=failed,
+        filename=outcome.path.name,
+        namespace=outcome.namespace,
+        sha256=outcome.sha256,
+        status=status,
+        error_msg=error_msg,
+        seconds=seconds,
     )
-    return run_id
+
+
+def record_documents(conn: Connection, outcomes: list[DocumentOutcome]) -> None:
+    for outcome in outcomes:
+        record_document(conn, outcome)
