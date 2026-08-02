@@ -18,7 +18,7 @@ raw file → load → SHA256 check ─┬─ already ingested → stop
                                             ↓
                            review extraction ─fail→ refine ─┐
                                   │  ↑──────────────────────┘
-                                  pass → record source → items
+                                  pass → record source → assign pages
 ```
 
 The SHA is taken over the file's raw bytes, so re-running never reprocesses an
@@ -28,24 +28,41 @@ type, and aliases, and `refine_extraction` rebuilds it — adding missing items,
 **dropping** spurious ones, and fixing the rest. The source row is written only
 after this review succeeds, so a document that fails partway can be retried.
 
+`assign_pages` closes the stage by resolving every item to the page it belongs
+to, so stage 2 receives one assignment per *page* rather than per item. It is
+the one step that must run serially — it is where "does this page already
+exist?" is answered, and two items naming the same thing must not both answer
+"no". Items are therefore resolved against the pages this document has already
+claimed as well as against the database, and two items that land on the same
+page are folded into one before any page is written. Nothing is written to the
+database here: the assignment is a plan, so an item that never gets a body does
+not leave an empty page behind.
+
 **Stage 2 — item → page** (`graph/item_graph.py`)
 
 ```
-item → does the entity exist?
-      ├─ no  → insert page → reference [1] → create page
-      └─ yes → link source → reference [N] → merge into existing page
+assignment → is this page new?
+      ├─ yes → insert page → reference [1] → create page
+      └─ no  → link source → reference [N] → merge into existing page
                                      ↓
                           page review ─fail→ refine ─┐
                                 │  ↑─────────────────┘
                                 pass
                                 ↓
-                    write .md + index.md, update db
+                          write .md, update db
 ```
 
-Items arrive already vetted by stage 1, so stage 2 has no per-item review and
-goes straight to entity resolution. Items are processed one at a time. That is
-what makes reference numbering and entity resolution safe — two items naming the
-same entity would otherwise race to create two pages for it.
+Items arrive already vetted *and* already resolved by stage 1, so stage 2 has no
+per-item review and no resolution step — it is handed a page and fills it in.
+
+**A document's items are folded in concurrently** (`LLM_WIKI_ITEM_WORKERS`,
+default 4; set it to 1 for serial ingest). This is safe precisely because
+resolution happened in stage 1: every assignment owns a distinct page, so no two
+workers contend for a page row, its reference numbering, or its file on disk.
+The one shared resource left is the database connection, which a re-entrant lock
+serializes — cheap, because no LLM call ever happens inside a transaction. The
+namespace index covers every page, so it is written once per document after all
+of its items are in, rather than once per item.
 
 **Citations.** Every fact in an item's description comes from the one document it
 was extracted from, so the reference number is uniform across the description and
@@ -57,10 +74,15 @@ existing citations.
 
 **Entity resolution** is a funnel. First an exact lookup in `page_aliases` (names
 are casefolded and whitespace-collapsed). On a miss, candidates are gathered from
-*two* signals — a vector search over page names (only the *name* is embedded;
-mixing the description in measures topical similarity rather than identity) and
+*three* signals — a vector search over page names (only the *name* is embedded;
+mixing the description in measures topical similarity rather than identity),
 string matching over existing aliases (rapidfuzz `token_sort_ratio`, which catches
-typos, plurals and casing the embeddings rank too far apart). The candidates,
+typos, plurals and casing the embeddings rank too far apart), and the pages this
+same document has already claimed but not yet written. That last one matters
+because resolution now runs ahead of any page being created: without it, a
+document naming one new thing two ways would be told "no such page" twice and
+produce a duplicate. Pending pages are offered to the judge under negative ids,
+so the sign of its answer says which list it points into. The candidates,
 together with the item's aliases and description, are handed to an LLM that decides
 whether it is the same entity or a new one. However a name resolves, it is recorded as an alias
 (`llm_sim`) so the next lookup for that name is an
@@ -120,6 +142,24 @@ uv run llm-wiki status                      # what is in the knowledge base
 Pages are written to `wiki/<namespace>/<Page_Name>.md`, with a generated
 `index.md` per namespace. The markdown files are the source of truth; PostgreSQL
 holds metadata only.
+
+When a document mostly lands but a handful of its items fail — a provider
+hiccup, a timeout — `retry` re-runs just those. It reads the failed item names
+out of `source.error_msg`, re-extracts the document, and folds only those items
+into their pages under the document's original source row: pages that already
+succeeded are not rewritten and citations keep their reference numbers. Clearing
+every recorded failure sets the source back to `ok`.
+
+```bash
+uv run llm-wiki retry                       # every failed source
+uv run llm-wiki retry 12 15                 # specific source ids
+uv run llm-wiki retry -n ml                 # only one namespace
+```
+
+A document that failed outright — nothing extracted, no items — is not retried
+this way; delete its `source` row and run `ingest` again. A raw file edited since
+it was ingested is refused too, since re-extracting it would attribute new
+material to the old document's hash.
 
 Ingest cross-links the pages it touches automatically. Run a full reconcile when
 you want links backfilled into pages added after their mentions were written:

@@ -50,6 +50,11 @@ class Settings:
     # Review loops: how many refine attempts before we give up and flag needs_review.
     review_retries: int = field(default_factory=lambda: _env_int("LLM_WIKI_REVIEW_RETRIES", 2))
 
+    # How many items of one document to fold in at once. Safe because stage 1
+    # assigns every item to a distinct page before stage 2 runs, so no two
+    # workers ever touch the same page. Set to 1 for fully serial ingest.
+    item_workers: int = field(default_factory=lambda: _env_int("LLM_WIKI_ITEM_WORKERS", 4))
+
     # Entity resolution
     #
     # Resolution is a funnel: an exact alias hit, then — for everything else —

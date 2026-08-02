@@ -1,8 +1,9 @@
 """Stage 2: one entity/concept item is folded into a new or existing wiki page.
 
-Items are processed one at a time. Serial execution is what makes the reference
-numbering and the "does this page already exist?" check safe: two items naming
-the same entity would otherwise race to create two pages for it.
+Entity resolution already happened in stage 1, which hands each run of this
+graph a page nothing else will touch. That is what makes it safe to run several
+of these concurrently: the reference numbering and the page file belong to one
+page, and one page belongs to one run.
 """
 
 from __future__ import annotations
@@ -14,10 +15,9 @@ from langgraph.graph import END, START, StateGraph
 from llm_wiki import embedding, links, pages
 from llm_wiki.db import repo
 from llm_wiki.db.connection import transaction
-from llm_wiki.db.repo import PageCandidate
 from llm_wiki.graph.state import Deps, ItemState
 from llm_wiki.llm import prompts
-from llm_wiki.llm.schemas import ExtractedItem, ResolveDecision, Review
+from llm_wiki.llm.schemas import ExtractedItem, Review
 
 log = logging.getLogger(__name__)
 
@@ -25,94 +25,6 @@ log = logging.getLogger(__name__)
 def build_item_graph(deps: Deps):
     """Compile the stage-2 graph."""
     settings = deps.settings
-
-    def _merge_candidates(
-        emb: list[PageCandidate], strings: list[PageCandidate]
-    ) -> list[PageCandidate]:
-        """Union both signals, one entry per page, capped for the LLM."""
-        seen: dict[int, PageCandidate] = {}
-        for candidate in (*strings, *emb):
-            seen.setdefault(candidate.page_id, candidate)
-        return list(seen.values())[: settings.resolve_candidate_limit]
-
-    def resolve_entity(state: ItemState) -> ItemState:
-        """Find the page this item belongs to.
-
-        A funnel: an exact alias hit, then — for everything else — candidates from
-        both the vector index and string matching are handed to an LLM to judge.
-        """
-        item = state["item"]
-        namespace = state["namespace"]
-
-        # (1) Exact alias — deterministic, no model needed.
-        match = repo.find_page_by_alias(deps.conn, namespace, item.name)
-        if match is not None:
-            log.info("%r resolves to page #%s (alias)", item.name, match.page_id)
-            return {
-                "is_new_page": False,
-                "page_id": match.page_id,
-                "page_name": match.page_name,
-                "matched_how": "alias",
-            }
-
-        # Gather candidates from both signals (recall-oriented thresholds).
-        vector = embedding.embed(
-            embedding.identity_text(item.name), model_name=settings.embedding_model
-        )
-        emb_candidates = repo.find_page_candidates_by_embedding(
-            deps.conn,
-            namespace,
-            vector,
-            settings.embedding_candidate_threshold,
-            settings.resolve_candidate_limit,
-        )
-        string_candidates = repo.find_page_candidates_by_string(
-            deps.conn,
-            namespace,
-            item.name,
-            settings.string_candidate_threshold,
-            settings.resolve_candidate_limit,
-        )
-
-        candidates = _merge_candidates(emb_candidates, string_candidates)
-
-        # (2) No candidate at all — nothing to resolve against.
-        if not candidates:
-            log.info("new page for %r", item.name)
-            return {"is_new_page": True, "page_name": item.name}
-
-        # (3) Let the LLM judge against name, aliases and description.
-        decision = deps.client.run_json(
-            prompts.resolve_entity(item, candidates), ResolveDecision, label="resolve"
-        )
-        chosen = next(
-            (c for c in candidates if c.page_id == decision.matched_page_id), None
-        )
-        if chosen is None:
-            if decision.matched_page_id is not None:
-                log.warning(
-                    "resolve returned page_id %s, not among candidates for %r; new page",
-                    decision.matched_page_id,
-                    item.name,
-                )
-            log.info("new page for %r (LLM: %s)", item.name, decision.reason)
-            return {"is_new_page": True, "page_name": item.name}
-
-        log.info(
-            "%r resolves to page #%s (LLM, %s: %s)",
-            item.name,
-            chosen.page_id,
-            decision.confidence,
-            decision.reason,
-        )
-        return {
-            "is_new_page": False,
-            "page_id": chosen.page_id,
-            "page_name": chosen.page_name,
-            "matched_how": "llm_sim",
-            # An uncertain match still merges, but a human is asked to confirm it.
-            "needs_review": decision.confidence == "low",
-        }
 
     def _record_aliases(
         item: ExtractedItem, namespace: str, page_id: int, *, canonical: bool, how: str = "alias"
@@ -132,14 +44,17 @@ def build_item_graph(deps: Deps):
         """Insert the page and its first reference, then write its body."""
         item = state["item"]
         namespace = state["namespace"]
+        page_name = state["page_name"]
 
-        vector = embedding.embed(
-            embedding.identity_text(item.name), model_name=settings.embedding_model
+        # Stage 1 embedded this name to resolve it; reuse that vector rather
+        # than paying for the same call again.
+        vector = state.get("name_embedding") or embedding.embed(
+            embedding.identity_text(page_name), model_name=settings.embedding_model
         )
         with transaction(deps.conn):
             page_id = repo.insert_page(
                 deps.conn,
-                page_name=item.name,
+                page_name=page_name,
                 namespace=namespace,
                 type_=item.type,
                 embedding=vector,
@@ -154,7 +69,6 @@ def build_item_graph(deps: Deps):
         )
         return {
             "page_id": page_id,
-            "page_name": item.name,
             "reference_number": reference_number,
             "existing_body": "",
             "body": pages.strip_references(body),
@@ -287,7 +201,13 @@ def build_item_graph(deps: Deps):
         return {"body": pages.strip_references(body), "page_attempts": attempts}
 
     def persist(state: ItemState) -> ItemState:
-        """Write the page and refresh the namespace index."""
+        """Write the page.
+
+        The namespace index is not rewritten here: it covers every page, so it
+        would be rewritten once per item for no reason, and concurrent items
+        would clobber each other's copy. The pipeline writes it once, after all
+        of a document's items are in.
+        """
         namespace = state["namespace"]
         needs_review = bool(state.get("needs_review"))
 
@@ -302,11 +222,11 @@ def build_item_graph(deps: Deps):
             body=state["body"],
             needs_review=needs_review,
         )
-        pages.write_index(deps.conn, wiki_dir=deps.wiki_dir, namespace=namespace)
         log.info("wrote %s%s", path, " (needs review)" if needs_review else "")
         return {"written_path": str(path)}
 
     def after_resolve(state: ItemState) -> str:
+        """Branch on the decision stage 1 already made for this item."""
         return "create" if state.get("is_new_page") else "merge"
 
     def after_page_review(state: ItemState) -> str:
@@ -325,7 +245,6 @@ def build_item_graph(deps: Deps):
         return {"needs_review": True}
 
     graph = StateGraph(ItemState)
-    graph.add_node("resolve_entity", resolve_entity)
     graph.add_node("create_page", create_page)
     graph.add_node("merge_page", merge_page)
     graph.add_node("review_create_page", review_create_page)
@@ -335,9 +254,8 @@ def build_item_graph(deps: Deps):
     graph.add_node("flag_page", flag_page)
     graph.add_node("persist", persist)
 
-    graph.add_edge(START, "resolve_entity")
     graph.add_conditional_edges(
-        "resolve_entity", after_resolve, {"create": "create_page", "merge": "merge_page"}
+        START, after_resolve, {"create": "create_page", "merge": "merge_page"}
     )
     graph.add_edge("create_page", "review_create_page")
     graph.add_edge("merge_page", "review_merge_page")

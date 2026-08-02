@@ -103,6 +103,22 @@ def list_sources(conn: Connection, limit: int = 50) -> list[Row]:
     ).fetchall()
 
 
+def list_failed_sources(conn: Connection, namespace: str | None = None) -> list[Row]:
+    """Documents whose last ingest ended in failure, oldest first.
+
+    What `llm-wiki retry` works through. Ordered by id so a batch retry visits
+    documents in the order they were ingested.
+    """
+    if namespace is None:
+        return conn.execute(
+            "SELECT * FROM source WHERE status = 'failed' ORDER BY id"
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM source WHERE status = 'failed' AND namespace = %s ORDER BY id",
+        (namespace,),
+    ).fetchall()
+
+
 def sources_by_namespace_filename(conn: Connection) -> dict[tuple[str, str], Row]:
     """Every source keyed by (namespace, filename), latest attempt winning.
 

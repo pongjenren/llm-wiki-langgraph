@@ -371,13 +371,13 @@ class TwoItemsSamePageClient(ScriptedClient):
         ]
 
     def create_page(self) -> str:
-        return "# Transformer\n\nFirst [1].\n"
-
-    def merge_page(self, attempt: int) -> str:
         return "# Transformer\n\nFirst [1]. Second [1].\n"
 
+    def merge_page(self, attempt: int) -> str:
+        raise AssertionError("two items for one page must be folded before stage 2")
 
-def test_two_items_from_one_document_share_a_reference(make_deps, doc, conn):
+
+def test_two_items_naming_one_thing_are_folded_into_one_page(make_deps, doc, conn):
     path = doc("a.md", "About transformers, twice.\n")
     outcome = ingest_document(make_deps(TwoItemsSamePageClient()), "ml", path)
 
@@ -385,7 +385,124 @@ def test_two_items_from_one_document_share_a_reference(make_deps, doc, conn):
     assert conn.execute("SELECT COUNT(*) AS n FROM wiki_source").fetchone()["n"] == 1, (
         "a source cites a page once, however many items point at it"
     )
-    assert [item.reference_number for item in outcome.items] == [1, 1]
+    # Both items resolve to one page, so stage 1 folds them into one assignment
+    # and the page is written once, from all of the document's material.
+    assert len(outcome.items) == 1
+    assert outcome.items[0].reference_number == 1
+    assert outcome.items[0].merged_names == ["Transformer", "Transformer"]
+
+
+class DifferentNamesSamePageClient(ScriptedClient):
+    """One document names the same new thing two different ways."""
+
+    def extract_items(self, document_index: int) -> list[ExtractedItem]:
+        return [
+            ExtractedItem(name="Transformer", type="concept", description="First."),
+            ExtractedItem(name="Transformer model", type="concept", description="Second."),
+        ]
+
+    def resolve(self) -> ResolveDecision:
+        # The only candidate on offer is the page the first item just planned.
+        return ResolveDecision(matched_page_id=-1, reason="same thing")
+
+    def create_page(self) -> str:
+        return "# Transformer\n\nFirst [1]. Second [1].\n"
+
+
+def test_second_name_for_a_pending_page_folds_instead_of_duplicating(make_deps, doc, conn):
+    """A page planned but not yet written is still a resolution target.
+
+    Stage 1 resolves every item before stage 2 writes any of them, so the second
+    item cannot find the first item's page in the database. It has to be offered
+    the pending page as a candidate, or the document would produce two pages for
+    one thing.
+    """
+    path = doc("a.md", "Transformers, under two names.\n")
+    deps = _always_ask_llm(make_deps(DifferentNamesSamePageClient()))
+    outcome = ingest_document(deps, "ml", path)
+
+    assert conn.execute("SELECT COUNT(*) AS n FROM wiki_pages").fetchone()["n"] == 1
+    assert len(outcome.items) == 1
+    assert outcome.items[0].merged_names == ["Transformer", "Transformer model"]
+    # The discarded name survives as an alias, so the next document resolves
+    # under it without having to ask the judge again.
+    alias = conn.execute(
+        "SELECT page_id FROM page_aliases WHERE query_name = 'transformer model'"
+    ).fetchone()
+    assert alias is not None
+
+
+class TwoItemsOneExistingPageClient(ScriptedClient):
+    """A second document names one already-existing page two different ways."""
+
+    def extract_items(self, document_index: int) -> list[ExtractedItem]:
+        if document_index == 1:
+            return [ExtractedItem(name="Transformer", type="concept", description="First.")]
+        return [
+            ExtractedItem(name="Transformers", type="concept", description="Second."),
+            ExtractedItem(name="Transformer net", type="concept", description="Third."),
+        ]
+
+    def resolve(self) -> ResolveDecision:
+        return ResolveDecision(matched_page_id=1, reason="same page")
+
+    def create_page(self) -> str:
+        return "# Transformer\n\nFirst [1].\n"
+
+    def merge_page(self, attempt: int) -> str:
+        return "# Transformer\n\nFirst [1]. Second [2]. Third [2].\n"
+
+
+def test_two_items_resolving_to_one_existing_page_are_folded(make_deps, doc, conn):
+    """One page, one assignment — even when two items reach it independently.
+
+    Neither name is in page_aliases yet, so both items resolve to the existing
+    page through the candidate signals on their own. Left as two assignments
+    they would be handed to two workers for the same page.
+    """
+    a = doc("a.md", "Transformers.\n")
+    b = doc("b.md", "Transformers, twice over.\n")
+    deps = _always_ask_llm(make_deps(TwoItemsOneExistingPageClient()))
+
+    ingest_document(deps, "ml", a)
+    outcome = ingest_document(deps, "ml", b)
+
+    assert conn.execute("SELECT COUNT(*) AS n FROM wiki_pages").fetchone()["n"] == 1
+    assert len(outcome.items) == 1
+    assert outcome.items[0].merged_names == ["Transformers", "Transformer net"]
+    assert outcome.items[0].reference_number == 2
+    assert conn.execute("SELECT COUNT(*) AS n FROM wiki_source").fetchone()["n"] == 2
+
+
+class ManyItemsClient(ScriptedClient):
+    """One document yields several unrelated items, one page each."""
+
+    def extract_items(self, document_index: int) -> list[ExtractedItem]:
+        return [
+            ExtractedItem(name=f"Concept {n}", type="concept", description=f"Number {n}.")
+            for n in range(6)
+        ]
+
+    def create_page(self) -> str:
+        return "# Page\n\nA claim [1].\n"
+
+
+def test_items_are_folded_in_concurrently(make_deps, doc, conn):
+    """Distinct items run in parallel and each still gets its own page."""
+    path = doc("a.md", "Six unrelated concepts.\n")
+    deps = make_deps(ManyItemsClient())
+    deps.settings = dataclasses.replace(deps.settings, item_workers=4)
+
+    outcome = ingest_document(deps, "ml", path)
+
+    assert outcome.ok
+    assert len(outcome.items) == 6
+    assert [item.name for item in outcome.items] == [f"Concept {n}" for n in range(6)], (
+        "results must be reported in item order however the workers interleave"
+    )
+    assert conn.execute("SELECT COUNT(*) AS n FROM wiki_pages").fetchone()["n"] == 6
+    assert all(item.reference_number == 1 for item in outcome.items)
+    assert all(item.written_path is not None for item in outcome.items)
 
 
 class FailingItemClient(TransformerClient):

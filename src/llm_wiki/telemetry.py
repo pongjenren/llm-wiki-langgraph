@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from llm_wiki.db import repo
 from llm_wiki.db.connection import Connection
-from llm_wiki.pipeline import DocumentOutcome
+from llm_wiki.pipeline import DocumentOutcome, RetryOutcome
 
 
 def _error_message(outcome: DocumentOutcome) -> str | None:
@@ -65,3 +65,42 @@ def record_document(conn: Connection, outcome: DocumentOutcome) -> int | None:
 def record_documents(conn: Connection, outcomes: list[DocumentOutcome]) -> None:
     for outcome in outcomes:
         record_document(conn, outcome)
+
+
+def _retry_error_message(outcome: RetryOutcome) -> str | None:
+    """What is still failing after a retry, in the same one-line-per-item form.
+
+    The retry only ever ran the items error_msg already named, so the new
+    message *replaces* the old one: anything it does not list has been fixed.
+    Names the re-extraction never produced are carried over -- nothing was run
+    for them, so they cannot be called fixed.
+    """
+    failures = [f"{item.name}: {item.error}" for item in outcome.items if item.error]
+    failures += [f"{name}: not extracted on retry" for name in outcome.unmatched]
+    return "\n".join(failures) or None
+
+
+def record_retry(conn: Connection, outcome: RetryOutcome) -> None:
+    """Fold a retry's result back into the source row it re-ran.
+
+    A retry that could not be attempted at all (missing file, changed file,
+    re-extraction error) leaves the row alone: its recorded failures are still
+    exactly the failures, and overwriting them with the reason the retry could
+    not start would lose them.
+    """
+    if outcome.error is not None:
+        return
+
+    error_msg = _retry_error_message(outcome)
+    repo.finish_source(
+        conn,
+        outcome.source_id,
+        status="failed" if error_msg else "ok",
+        error_msg=error_msg,
+        seconds=round(outcome.elapsed_seconds, 3),
+    )
+
+
+def record_retries(conn: Connection, outcomes: list[RetryOutcome]) -> None:
+    for outcome in outcomes:
+        record_retry(conn, outcome)

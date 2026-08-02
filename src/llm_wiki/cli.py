@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import typer
 
@@ -15,7 +15,7 @@ from llm_wiki.db import repo
 from llm_wiki.db.connection import connect, init_db
 from llm_wiki.graph import Deps
 from llm_wiki.llm.client import LLMClient
-from llm_wiki.pipeline import DocumentOutcome, ingest_documents
+from llm_wiki.pipeline import DocumentOutcome, RetryOutcome, ingest_documents, retry_sources
 
 app = typer.Typer(help="Ingest raw documents into the llm-wiki knowledge base.")
 
@@ -59,7 +59,9 @@ def _resolve_targets(path: Optional[Path], namespace: Optional[str]) -> list[tup
     return [(namespace, path)]
 
 
-def _link_touched_pages(conn, client, outcomes: list[DocumentOutcome]) -> None:
+def _link_touched_pages(
+    conn, client, outcomes: Sequence[DocumentOutcome | RetryOutcome]
+) -> None:
     """Relink the pages this run created or merged into.
 
     Incremental by design: only pages touched here are rescanned, so they link
@@ -127,7 +129,12 @@ def _report(outcomes: list[DocumentOutcome]) -> int:
             if item.needs_review:
                 flagged += 1
                 flag = " ⚠️ needs review"
-            typer.echo(f"    · {item.page_name}: {action}{flag}")
+            # More than one name means the document named this page twice and
+            # the two were folded together before the page was written.
+            folded = ""
+            if len(item.merged_names) > 1:
+                folded = f" (+{', '.join(item.merged_names[1:])})"
+            typer.echo(f"    · {item.page_name}{folded}: {action}{flag}")
 
     typer.echo("")
     typer.echo(
@@ -179,6 +186,123 @@ def ingest(
                 log.warning("failed to record ingest telemetry: %s", exc)
             _link_touched_pages(conn, client, outcomes)
             return _report(outcomes)
+        finally:
+            conn.close()
+
+    raise typer.Exit(code=run())
+
+
+def _report_retries(outcomes: list[RetryOutcome]) -> int:
+    """Print a retry summary and return the process exit code."""
+    fixed = still_failing = flagged = 0
+
+    for outcome in outcomes:
+        label = f"source #{outcome.source_id} {outcome.filename}"
+
+        if outcome.error:
+            still_failing += len(outcome.requested) or 1
+            typer.secho(f"✗ {label}: {outcome.error}", fg=typer.colors.RED)
+            continue
+
+        typer.secho(f"↻ {label}: retrying {len(outcome.requested)} item(s)", fg=typer.colors.CYAN)
+        if outcome.collateral:
+            typer.secho(
+                f"    ⚠️ also re-merging {', '.join(outcome.collateral)}, which did not fail",
+                fg=typer.colors.YELLOW,
+            )
+
+        for item in outcome.items:
+            if item.error:
+                still_failing += 1
+                typer.secho(f"    ✗ {item.name}: {item.error}", fg=typer.colors.RED)
+                continue
+            fixed += 1
+            action = "created" if item.is_new_page else f"merged as [{item.reference_number}]"
+            flag = ""
+            if item.needs_review:
+                flagged += 1
+                flag = " ⚠️ needs review"
+            typer.secho(f"    ✓ {item.page_name}: {action}{flag}", fg=typer.colors.GREEN)
+
+        for name in outcome.unmatched:
+            still_failing += 1
+            typer.secho(f"    ✗ {name}: not extracted on retry", fg=typer.colors.RED)
+
+    cleared = sum(1 for outcome in outcomes if outcome.ok)
+    typer.echo("")
+    typer.echo(
+        f"{len(outcomes)} source(s): {fixed} item(s) recovered, {still_failing} still failing, "
+        f"{flagged} flagged, {cleared} source(s) now clean."
+    )
+    return 1 if still_failing else 0
+
+
+@app.command()
+def retry(
+    source_ids: Optional[list[int]] = typer.Argument(
+        None, help="Source ids to retry. Defaults to every failed source."
+    ),
+    namespace: Optional[str] = typer.Option(
+        None, "--namespace", "-n", help="Only retry failed sources in this namespace."
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show debug logging."),
+) -> None:
+    """Re-run only the items a document failed on, leaving its good pages alone.
+
+    For a document that mostly landed: `source.error_msg` names the items that
+    failed, and this re-extracts the document, picks those items back out, and
+    folds just them into their pages under the document's original source row.
+    Successful pages are never rewritten, and citations keep their numbers.
+
+    A document that failed outright — nothing extracted, no items — is not
+    retried here; delete its source row and run `ingest` again.
+    """
+    _configure_logging(verbose)
+
+    if not settings.openrouter_api_key:
+        typer.secho(
+            "OPENROUTER_API_KEY is not set. Copy .env.example to .env and fill it in.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=2)
+
+    def run() -> int:
+        conn = connect(settings.db_url)
+        try:
+            init_db(conn)
+
+            if source_ids:
+                sources = []
+                for source_id in source_ids:
+                    row = repo.get_source(conn, source_id)
+                    if row is None:
+                        typer.secho(f"No source #{source_id}.", fg=typer.colors.RED)
+                        return 2
+                    if row["status"] != "failed":
+                        typer.secho(
+                            f"Source #{source_id} ({row['filename']}) is not failed; skipping.",
+                            fg=typer.colors.YELLOW,
+                        )
+                        continue
+                    sources.append(row)
+            else:
+                sources = repo.list_failed_sources(conn, namespace)
+
+            if not sources:
+                typer.secho("Nothing to retry.", fg=typer.colors.YELLOW)
+                return 0
+
+            typer.echo(f"Retrying failed items in {len(sources)} source(s)\n")
+
+            client = LLMClient()
+            deps = Deps(conn=conn, client=client, settings=settings)
+            outcomes = retry_sources(deps, sources)
+            try:
+                telemetry.record_retries(conn, outcomes)
+            except Exception as exc:  # telemetry must never fail a retry
+                log.warning("failed to record retry telemetry: %s", exc)
+            _link_touched_pages(conn, client, outcomes)
+            return _report_retries(outcomes)
         finally:
             conn.close()
 

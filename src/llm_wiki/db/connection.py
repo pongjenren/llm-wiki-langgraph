@@ -8,6 +8,7 @@ was written against. Rows come back as dict-like ``RealDictRow`` objects, so
 
 from __future__ import annotations
 
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Sequence
@@ -38,19 +39,33 @@ class Connection:
     Exposes ``execute(sql, params)`` returning a cursor, so repo functions read
     the same as they did on sqlite3. The underlying connection runs in
     autocommit mode; explicit transactions are opened via :func:`transaction`.
+
+    One connection is shared by every ingest worker, so a re-entrant lock
+    serializes access to it. Transactions are a property of the connection, not
+    of the cursor: without the lock, a second thread's statements would silently
+    join whatever transaction another thread had open, and its BEGIN/COMMIT
+    would interleave with theirs. Holding it is cheap because no LLM call ever
+    happens inside a transaction -- the ingest graphs commit before they prompt
+    -- so the lock is only ever held for the duration of the SQL itself.
     """
 
     def __init__(self, raw: psycopg2.extensions.connection) -> None:
         self._raw = raw
+        self._lock = threading.RLock()
 
     @property
     def raw(self) -> psycopg2.extensions.connection:
         return self._raw
 
+    @property
+    def lock(self) -> threading.RLock:
+        return self._lock
+
     def execute(self, sql: str, params: Sequence[Any] = ()) -> RealDictCursor:
-        cur = self._raw.cursor()
-        cur.execute(sql, params)
-        return cur
+        with self._lock:
+            cur = self._raw.cursor()
+            cur.execute(sql, params)
+            return cur
 
     def close(self) -> None:
         self._raw.close()
@@ -86,15 +101,20 @@ def transaction(conn: Connection) -> Iterator[Connection]:
     here with BEGIN/COMMIT and rolled back on error. Transactions are
     per-connection, so statements run through ``conn.execute`` inside the block
     all join this transaction.
+
+    The connection lock is held for the whole block, which is what keeps a
+    concurrent worker's statements out of this transaction. ``conn.execute``
+    takes the same lock re-entrantly, so nested use inside the block is fine.
     """
-    cur = conn.raw.cursor()
-    cur.execute("BEGIN")
-    try:
-        yield conn
-    except Exception:
-        cur.execute("ROLLBACK")
-        raise
-    else:
-        cur.execute("COMMIT")
-    finally:
-        cur.close()
+    with conn.lock:
+        cur = conn.raw.cursor()
+        cur.execute("BEGIN")
+        try:
+            yield conn
+        except Exception:
+            cur.execute("ROLLBACK")
+            raise
+        else:
+            cur.execute("COMMIT")
+        finally:
+            cur.close()
