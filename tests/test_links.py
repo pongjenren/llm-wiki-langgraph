@@ -120,6 +120,56 @@ def test_longest_alias_wins(conn, settings):
     assert out == {long_id}
 
 
+def test_own_name_shadows_a_shorter_page_name_inside_it(conn, settings):
+    apple = _page(conn, settings, "Apple", "# Apple\n\nx\n")
+    src = _page(
+        conn,
+        settings,
+        "Apple TV",
+        "# Apple TV\n\nApple TV is a product made by Apple.\n",
+    )
+
+    _all(conn, settings)
+    body = _body(settings, "Apple TV")
+
+    # The "Apple" opening the sentence belongs to this page's own name; the link
+    # goes on the standalone mention instead.
+    assert "made by [Apple](Apple.md)." in body
+    assert body.count("](Apple.md)") == 1
+    out = {row["dst_page_id"] for row in repo.list_outgoing_links(conn, src)}
+    assert out == {apple}
+
+
+def test_name_only_inside_a_longer_entity_is_not_linked(conn, settings):
+    _page(conn, settings, "Apple", "# Apple\n\nx\n")
+    src = _page(conn, settings, "Apple TV", "# Apple TV\n\nApple TV streams video.\n")
+
+    _all(conn, settings)
+
+    assert "](Apple.md)" not in _body(settings, "Apple TV")
+    assert repo.list_outgoing_links(conn, src) == []
+
+
+def test_longer_page_name_shadows_repeat_mentions_too(conn, settings):
+    tv_id = _page(conn, settings, "Apple TV", "# Apple TV\n\nx\n")
+    _page(conn, settings, "Apple", "# Apple\n\nx\n")
+    src = _page(
+        conn,
+        settings,
+        "Streaming",
+        "# Streaming\n\nApple TV leads. Apple TV is popular.\n",
+    )
+
+    _all(conn, settings)
+    body = _body(settings, "Streaming")
+
+    # The second "Apple TV" is already-linked-elsewhere, not free real estate:
+    # the "Apple" inside it must not be linked either.
+    assert "](Apple.md)" not in body
+    out = {row["dst_page_id"] for row in repo.list_outgoing_links(conn, src)}
+    assert out == {tv_id}
+
+
 def test_never_links_to_itself(conn, settings):
     _page(conn, settings, "Transformer", "# Transformer\n\nThe Transformer is a Transformer.\n")
 

@@ -303,6 +303,8 @@ def _render_link_candidates(candidates: Sequence[LinkCandidate]) -> str:
             f"- [page_id={c.page_id}] {c.page_name} | aliases: {aliases} | "
             f"same source document: {origin}{seen}"
         )
+        if c.mention_sentence:
+            lines.append(f"    in context: {c.mention_sentence}")
     return "\n".join(lines)
 
 
@@ -327,6 +329,9 @@ Page body:
 Rules:
 - Link a phrase only when it genuinely refers to that exact candidate's
   entity/concept. A merely related or same-topic page is NOT a link.
+- A name that only shows up inside a longer name is not a mention of that page:
+  the "Apple" in "Apple TV" refers to Apple TV, not to Apple. Link such a page
+  only if it is also named on its own somewhere in the body.
 - For each link, copy `anchor_text` verbatim from the body (same words, same
   casing). Do not invent or paraphrase the anchor.
 - `target_page_id` must be one of the page_ids listed above.

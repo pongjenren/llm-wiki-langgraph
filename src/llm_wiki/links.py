@@ -17,6 +17,12 @@ scan uses -- case- and whitespace-insensitive, respecting word boundaries and
 protected regions (code, headings, existing links), longest anchor wins, and each
 target linked only at its first mention.
 
+"Longest wins" is decided against every known name, including the page's own, so
+a short name is never linked out of the middle of a longer entity: on the page
+"Apple TV", the link in "Apple TV is a product made by Apple" lands on the
+trailing "Apple". A name that appears nowhere outside a longer entity is left
+unlinked rather than linked in the wrong place.
+
 Re-running is safe: existing links to sibling pages are unwrapped back to plain
 text before matching, so a page is always relinked from a clean body and the
 ``wiki_links`` rows are rebuilt to match.
@@ -150,18 +156,35 @@ class _Match:
     end: int  # inclusive
     page_id: int
     page_name: str
+    # A mention that only claims its span so nothing shorter may be linked
+    # inside it -- never linked itself. See ``find_matches``.
+    shadow: bool = False
 
 
 def find_matches(
-    body: str, automaton: ahocorasick.Automaton | None, src_page_id: int
+    body: str,
+    automaton: ahocorasick.Automaton | None,
+    src_page_id: int,
+    shadow_automaton: ahocorasick.Automaton | None = None,
 ) -> list[_Match]:
     """Locate the mentions to link, already de-conflicted.
 
-    A page is linked at its first mention only; where aliases overlap the
-    longest wins; matches inside code, existing links or headings, and mentions
-    of the page itself, are dropped.
+    Every known name in the body -- linkable or not -- competes for its span, and
+    the longest wins. That is what keeps a short name from being linked out of
+    the middle of a longer entity: on the page "Apple TV", the "Apple" inside
+    "Apple TV is a product made by Apple" is swallowed by the page's own name, so
+    the trailing "Apple" is the one that becomes the link.
+
+    The losers of that contest are dropped, not relocated: mentions of the page
+    itself and ``shadow_automaton`` hits exist only to claim their span, and a
+    name that appears nowhere outside a longer entity is simply not linked.
+
+    ``shadow_automaton`` carries the names that must block without being linked
+    (the whole namespace dictionary, when ``automaton`` holds only the anchors an
+    LLM approved). Of what survives, matches inside code, existing links or
+    headings are dropped, and each target page keeps its first mention only.
     """
-    if automaton is None:
+    if automaton is None and shadow_automaton is None:
         return []
 
     norm, orig_idx = _normalize_with_map(body)
@@ -171,33 +194,42 @@ def find_matches(
         return any(start <= pe and ps <= end for ps, pe in protected)
 
     raw: list[_Match] = []
-    for norm_end, (length, page_id, page_name) in automaton.iter(norm):
-        norm_start = norm_end - length + 1
-        start = orig_idx[norm_start]
-        end = orig_idx[norm_end]
-        if page_id == src_page_id:
+    for source, shadow in ((automaton, False), (shadow_automaton, True)):
+        if source is None:
             continue
-        if start > 0 and _is_word_char(body[start - 1]):
-            continue
-        if end + 1 < len(body) and _is_word_char(body[end + 1]):
-            continue
-        if in_protected(start, end):
-            continue
-        raw.append(_Match(start, end, page_id, page_name))
+        for norm_end, (length, page_id, page_name) in source.iter(norm):
+            norm_start = norm_end - length + 1
+            start = orig_idx[norm_start]
+            end = orig_idx[norm_end]
+            if start > 0 and _is_word_char(body[start - 1]):
+                continue
+            if end + 1 < len(body) and _is_word_char(body[end + 1]):
+                continue
+            if in_protected(start, end):
+                continue
+            raw.append(_Match(start, end, page_id, page_name, shadow))
 
-    # Longest match first at any given start, then greedily take non-overlapping
-    # matches, one per target page.
-    raw.sort(key=lambda m: (m.start, -(m.end - m.start)))
-    accepted: list[_Match] = []
-    linked: set[int] = set()
+    # Longest match first at any given start (a real anchor beating a shadow of
+    # equal length), then greedily take non-overlapping matches: the mentions
+    # that own their span.
+    raw.sort(key=lambda m: (m.start, -(m.end - m.start), m.shadow))
+    dominant: list[_Match] = []
     cursor = -1
     for m in raw:
-        if m.start <= cursor or m.page_id in linked:
+        if m.start <= cursor:
+            continue
+        dominant.append(m)
+        cursor = m.end
+
+    # Of those, keep what is actually linkable: one link per target page, at its
+    # first mention.
+    accepted: list[_Match] = []
+    linked: set[int] = set()
+    for m in dominant:
+        if m.shadow or m.page_id == src_page_id or m.page_id in linked:
             continue
         accepted.append(m)
         linked.add(m.page_id)
-        cursor = m.end
-    accepted.sort(key=lambda m: m.start)
     return accepted
 
 
@@ -284,7 +316,8 @@ class LinkCandidate:
     ``from_source`` marks the pages written from the same document (the first
     list); ``mention`` carries the surface text an alias scan already found in the
     body (the second list), or None when only the shared-source signal put the
-    page here.
+    page here. ``mention_sentence`` is the sentence that mention sits in, so the
+    judge can read the mention in context instead of as a bare string.
     """
 
     page_id: int
@@ -292,6 +325,7 @@ class LinkCandidate:
     aliases: list[str]
     from_source: bool
     mention: str | None
+    mention_sentence: str | None = None
 
 
 def _gather_candidates(
@@ -308,8 +342,10 @@ def _gather_candidates(
     an alias scan of the body turns up. A page can be on both.
     """
     mention_by_page: dict[int, str] = {}
+    sentence_by_page: dict[int, str] = {}
     for m in find_matches(body, automaton, src_page_id):
-        mention_by_page.setdefault(m.page_id, body[m.start : m.end + 1])
+        mention_by_page[m.page_id] = body[m.start : m.end + 1]
+        sentence_by_page[m.page_id] = _sentence_span(body, m.start, m.end)
 
     candidate_ids = set(mention_by_page) | (sibling_ids - {src_page_id})
     candidates: list[LinkCandidate] = []
@@ -324,6 +360,7 @@ def _gather_candidates(
                 aliases=sorted(alias_by_page.get(page_id, set())),
                 from_source=page_id in sibling_ids,
                 mention=mention_by_page.get(page_id),
+                mention_sentence=sentence_by_page.get(page_id),
             )
         )
     return candidates
@@ -334,6 +371,7 @@ def _approved_matches(
     decision: LinkDecision,
     catalog: dict[int, LinkCandidate],
     src_page_id: int,
+    automaton: ahocorasick.Automaton | None,
 ) -> list[_Match]:
     """Turn the LLM's picks into concrete matches, dropping anything unreal.
 
@@ -342,6 +380,11 @@ def _approved_matches(
     run through the same matcher the candidate scan uses, so every deterministic
     guard (word boundaries, protected regions, first mention, longest anchor)
     still applies to the final splice.
+
+    The namespace dictionary rides along as ``shadow_automaton`` because the
+    model returns an anchor, not a position: without it, an approved "Apple"
+    would be spliced into the "Apple TV" that opens the page. Shadowed there, it
+    lands on the first mention that stands on its own.
     """
     entries: list[tuple[str, int, str]] = []
     for link in decision.links:
@@ -357,7 +400,7 @@ def _approved_matches(
             continue
         entries.append((anchor, candidate.page_id, candidate.page_name))
 
-    return find_matches(body, build_automaton(entries), src_page_id)
+    return find_matches(body, build_automaton(entries), src_page_id, automaton)
 
 
 @dataclass
@@ -391,7 +434,7 @@ def relink_body(
         prompts.link_page(page_name, unwrapped, candidates), LinkDecision, label="link"
     )
     catalog = {c.page_id: c for c in candidates}
-    matches = _approved_matches(unwrapped, decision, catalog, src_page_id)
+    matches = _approved_matches(unwrapped, decision, catalog, src_page_id, automaton)
     return _apply(unwrapped, matches)
 
 
